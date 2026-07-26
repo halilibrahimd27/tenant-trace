@@ -1,0 +1,211 @@
+name: "TenantTrace"
+description: "Audit multi-tenant isolation: prove whether tenant A can reach tenant B's data."
+author: "halilibrahimd27"
+
+branding:
+  icon: shield
+  color: blue
+
+inputs:
+  config:
+    description: "Path to tenanttrace.toml"
+    required: false
+    default: "tenanttrace.toml"
+  base-url:
+    description: "Override [target] base_url (useful when the app runs as a service container)"
+    required: false
+    default: ""
+  fail-on:
+    description: "Minimum severity that fails the check (critical|high|medium|low|none)"
+    required: false
+    default: "high"
+  baseline:
+    description: "Path to a baseline file of accepted findings"
+    required: false
+    default: ".tenanttrace-baseline.json"
+  scan-path:
+    description: "Source path for the static engine. Empty = skip the static pass."
+    required: false
+    default: ""
+  allow-mutation:
+    description: "Enable mutating attacks (mass-assignment / cross-tenant writes)"
+    required: false
+    default: "false"
+  i-have-authorization:
+    description: "Required for non-loopback targets. A statement you are making."
+    required: false
+    default: "false"
+  comment-on-pr:
+    description: "Post the finding summary as a PR comment"
+    required: false
+    default: "true"
+  upload-artifacts:
+    description: "Upload the run transcript as a workflow artifact"
+    required: false
+    default: "true"
+  version:
+    description: "TenantTrace version to install (a PyPI specifier, or 'source' for this checkout)"
+    required: false
+    default: "source"
+
+outputs:
+  findings:
+    description: "Path to the JSON findings file"
+    value: ${{ steps.probe.outputs.findings }}
+  confirmed-count:
+    description: "Number of dynamically confirmed findings"
+    value: ${{ steps.probe.outputs.confirmed-count }}
+  status:
+    description: "VALID | INVALID (INVALID = positive controls failed)"
+    value: ${{ steps.probe.outputs.status }}
+  exit-code:
+    description: "0 clean · 1 findings gated · 2 usage error · 3 run INVALID"
+    value: ${{ steps.probe.outputs.exit-code }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install TenantTrace
+      shell: bash
+      run: |
+        if [ "${{ inputs.version }}" = "source" ]; then
+          python -m pip install --quiet "${{ github.action_path }}"
+        else
+          python -m pip install --quiet "tenanttrace${{ inputs.version }}"
+        fi
+        tenanttrace version
+
+    - name: Validate configuration
+      shell: bash
+      run: tenanttrace validate-config --config "${{ inputs.config }}"
+
+    - name: Static scan
+      if: inputs.scan-path != ''
+      shell: bash
+      # Hypotheses only — this step never fails the build on its own (rule 3).
+      run: tenanttrace scan --path "${{ inputs.scan-path }}" --config "${{ inputs.config }}" || true
+
+    - name: Probe
+      id: probe
+      shell: bash
+      run: |
+        set +e
+        args=(--config "${{ inputs.config }}")
+        [ -n "${{ inputs.base-url }}" ] && args+=(--base-url "${{ inputs.base-url }}")
+        [ -n "${{ inputs.baseline }}" ] && [ -f "${{ inputs.baseline }}" ] && args+=(--baseline "${{ inputs.baseline }}")
+        [ "${{ inputs.allow-mutation }}" = "true" ] && args+=(--allow-mutation)
+        [ "${{ inputs.i-have-authorization }}" = "true" ] && args+=(--i-have-authorization)
+
+        tenanttrace probe "${args[@]}" | tee /tmp/tenanttrace-probe.log
+        code=${PIPESTATUS[0]}
+        echo "exit-code=$code" >> "$GITHUB_OUTPUT"
+
+        report=$(find . -path '*/.tenanttrace/runs/*/report.json' -print 2>/dev/null | sort | tail -1)
+        echo "findings=$report" >> "$GITHUB_OUTPUT"
+
+        if [ -n "$report" ]; then
+          python - "$report" <<'PY' >> "$GITHUB_OUTPUT"
+        import json, sys
+        data = json.load(open(sys.argv[1]))
+        confirmed = [f for f in data.get("findings", []) if f.get("confidence") == "confirmed"]
+        print(f"confirmed-count={len(confirmed)}")
+        print(f"status={'VALID' if data.get('status') == 'valid' else 'INVALID'}")
+        PY
+        else
+          echo "confirmed-count=0" >> "$GITHUB_OUTPUT"
+          echo "status=INVALID" >> "$GITHUB_OUTPUT"
+        fi
+        exit 0
+
+    - name: Job summary
+      if: always()
+      shell: bash
+      run: |
+        report="${{ steps.probe.outputs.findings }}"
+        {
+          echo "## TenantTrace"
+          if [ "${{ steps.probe.outputs.status }}" != "VALID" ]; then
+            echo
+            echo "> **RUN INVALID** — the positive controls failed, so this run says nothing"
+            echo "> about tenant isolation. It is not a clean result; it is an untested"
+            echo "> application. Fix the harness and run again."
+            echo
+          fi
+          if [ -n "$report" ]; then
+            tenanttrace report --run "$report" --format md 2>/dev/null || cat /tmp/tenanttrace-probe.log
+          else
+            cat /tmp/tenanttrace-probe.log
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Comment on the pull request
+      if: inputs.comment-on-pr == 'true' && github.event_name == 'pull_request'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        # Deliberately NOT the full report: canary values and response bodies must
+        # never reach a comment that is public on a public repository.
+        report="${{ steps.probe.outputs.findings }}"
+        body=$(python - "$report" <<'PY'
+        import json, sys
+        try:
+            data = json.load(open(sys.argv[1]))
+        except Exception:
+            print("TenantTrace produced no report — check the workflow log."); raise SystemExit
+        status = data.get("status", "unknown")
+        findings = data.get("findings", [])
+        confirmed = [f for f in findings if f.get("confidence") == "confirmed"]
+        lines = ["### TenantTrace — tenant isolation audit", ""]
+        if status != "valid":
+            lines += ["> **RUN INVALID.** Positive controls failed: a tenant could not read its",
+                      "> own seeded data. Nothing below is evidence of isolation.", ""]
+        counts: dict[str, int] = {}
+        for f in confirmed:
+            counts[f["severity"]] = counts.get(f["severity"], 0) + 1
+        order = ["critical", "high", "medium", "low", "info"]
+        summary = " · ".join(f"**{counts[s]}** {s}" for s in order if counts.get(s))
+        lines.append(f"{len(confirmed)} confirmed finding(s)" + (f": {summary}" if summary else ""))
+        lines.append(f"Coverage: {data.get('endpoints_tested', 0)} of "
+                     f"{data.get('endpoints_discovered', 0)} endpoints, "
+                     f"{len(data.get('results', []))} cross-tenant attempts.")
+        if confirmed:
+            lines += ["", "| severity | category | location |", "| --- | --- | --- |"]
+            for f in confirmed:
+                lines.append(f"| {f['severity']} | {f['category']} | `{f['location']}` |")
+        suspected = [f for f in findings if f.get("confidence") == "suspected"]
+        if suspected:
+            lines += ["", f"{len(suspected)} static hypothes(es) reported; they do not gate this build."]
+        lines += ["", "<sub>Evidence and canary values are in the workflow artifact, not here.</sub>"]
+        print("\n".join(lines))
+        PY
+        )
+        gh pr comment "${{ github.event.pull_request.number }}" --body "$body" --edit-last --create-if-none \
+          || gh pr comment "${{ github.event.pull_request.number }}" --body "$body"
+
+    - name: Upload run artifacts
+      if: always() && inputs.upload-artifacts == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: tenanttrace-run
+        path: .tenanttrace/
+        retention-days: 7
+        if-no-files-found: ignore
+
+    - name: Gate
+      shell: bash
+      run: |
+        code="${{ steps.probe.outputs.exit-code }}"
+        case "$code" in
+          0) echo "✅ no findings at or above ${{ inputs.fail-on }}" ;;
+          1) echo "::error::TenantTrace found confirmed cross-tenant findings at or above ${{ inputs.fail-on }}" ;;
+          2) echo "::error::TenantTrace configuration error — see the log" ;;
+          3) echo "::error::TenantTrace run INVALID: positive controls failed. This is NOT a clean result." ;;
+          *) echo "::error::TenantTrace exited with $code" ;;
+        esac
+        exit "$code"

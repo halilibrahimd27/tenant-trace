@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TenantTrace — prove your tenants can't see each other</title>
+<meta name="description" content="TenantTrace boots your SaaS with two seeded tenants and tries to read one from the other. Confirmed findings, not heuristics. Runs in CI.">
+
+<meta property="og:title" content="TenantTrace">
+<meta property="og:description" content="Your tests run as one tenant. That's the bug.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://halilibrahimd27.github.io/tenant-trace/">
+<meta name="twitter:card" content="summary_large_image">
+<!-- No og:image yet. A social preview that is a stock gradient with the tool's
+     name on it says nothing; a screenshot of a real report would say something,
+     and that is worth waiting for rather than filling the slot. -->
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="nav">
+  <a class="brand" href="./">
+    <span class="brand-mark" aria-hidden="true"></span>
+    TenantTrace
+  </a>
+  <nav>
+    <a href="#how">How it works</a>
+    <a href="#catches">What it catches</a>
+    <a href="#start">Quickstart</a>
+    <a class="nav-gh" href="https://github.com/halilibrahimd27/tenant-trace">GitHub</a>
+  </nav>
+</header>
+
+<main id="main">
+
+<!-- ───────────────────────────── hero ───────────────────────────── -->
+<section class="hero">
+  <div class="hero-copy">
+    <p class="eyebrow">Multi-tenant isolation auditor</p>
+    <h1>Your tests run as<br>one tenant.<br><em>That's the bug.</em></h1>
+    <p class="lede">
+      Every test you have passes as a single customer, so the one query that
+      forgot its tenant filter looks fine. TenantTrace seeds two tenants, asks
+      for one while signed in as the other, and tells you what came back.
+    </p>
+    <div class="hero-actions">
+      <a class="btn btn-primary" href="#start">Get started</a>
+      <a class="btn" href="#how">How it works</a>
+    </div>
+  </div>
+
+  <!-- signature element: the proof -->
+  <figure class="proof" aria-label="Example: a cross-tenant read confirmed by a canary">
+    <figcaption class="proof-head">
+      <span class="dot" aria-hidden="true"></span>
+      <span class="proof-title">confirmed cross-tenant read</span>
+      <span class="proof-tag">TT-0007</span>
+    </figcaption>
+
+    <div class="proof-body">
+      <p class="line" style="--i:0"><span class="c-a">signed in as tenant A</span></p>
+      <p class="line" style="--i:1"><span class="verb">GET</span> /api/invoices/<span class="id">018f9c…b41d</span></p>
+      <p class="line rule" style="--i:2"><span>response</span><span class="status">200 OK</span></p>
+      <p class="line" style="--i:3">{</p>
+      <p class="line" style="--i:4">  "id": "018f9c…b41d",</p>
+      <p class="line leak" style="--i:5">  "title": "<span class="canary">tt-canary-B-7f3a91</span> invoice 2",</p>
+      <p class="line" style="--i:6">  "amount": 102</p>
+      <p class="line" style="--i:7">}</p>
+      <p class="line verdict" style="--i:8">
+        <span class="c-b">tenant B's canary</span> returned to
+        <span class="c-a">tenant A</span> — proof, not a guess
+      </p>
+    </div>
+  </figure>
+</section>
+
+<!-- ───────────────────────────── problem ───────────────────────────── -->
+<section class="band" id="problem">
+  <div class="wrap">
+    <h2 class="section-h">The leak nobody's test suite finds</h2>
+    <div class="cols">
+      <div>
+        <h3>It only takes one</h3>
+        <p>A tenant id enters through middleware and has to stay attached through
+        every service call, ORM filter, cache key and job payload. Drop it in one
+        place and one customer reads another customer's invoices.</p>
+      </div>
+      <div>
+        <h3>Static analysis alone cries wolf</h3>
+        <p>"Query without a tenant filter" flags every repository call in a
+        well-built app, because the filter lives at the boundary, not the call
+        site. Hundreds of findings, no signal, nobody reads the report twice.</p>
+      </div>
+      <div>
+        <h3>So we confirm instead of guessing</h3>
+        <p>Static analysis proposes; the prober proves. Only findings reproduced
+        against a running app are reported as confirmed — and only those fail
+        your build.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ───────────────────────────── how ───────────────────────────── -->
+<section class="band alt" id="how">
+  <div class="wrap">
+    <h2 class="section-h">How a run works</h2>
+    <p class="section-sub">Order matters here — step 2 is what stops a broken
+    harness from reporting a clean bill of health.</p>
+
+    <ol class="steps">
+      <li>
+        <span class="step-n">01</span>
+        <h3>Seed two tenants</h3>
+        <p>Your seeder adapter — about thirty lines, written once per app —
+        creates tenant A and tenant B. Every B record carries a unique canary
+        string in a text field.</p>
+      </li>
+      <li>
+        <span class="step-n">02</span>
+        <h3>Check the controls</h3>
+        <p>A reads A's own data. If that fails, authentication is broken and the
+        run is marked invalid. A run that can't reach anything is not a run
+        that found nothing.</p>
+      </li>
+      <li>
+        <span class="step-n">03</span>
+        <h3>Cross the line</h3>
+        <p>Now A goes after B: object ids, list endpoints, aggregate counts,
+        tenant parameters in the query string, and — if you allow writes —
+        moving a record into someone else's account.</p>
+      </li>
+      <li>
+        <span class="step-n">04</span>
+        <h3>Read the verdict</h3>
+        <p>B's canary in A's response is a confirmed leak. A count higher than
+        A's seeded total is a confirmed leak. Anything the oracle can't decide
+        is reported as inconclusive, never as a pass.</p>
+      </li>
+    </ol>
+  </div>
+</section>
+
+<!-- ───────────────────────────── catches ───────────────────────────── -->
+<section class="band" id="catches">
+  <div class="wrap">
+    <h2 class="section-h">What it looks for</h2>
+    <div class="table-scroll">
+      <table class="matrix">
+        <thead>
+          <tr><th>Check</th><th>Question it asks</th><th>Engine</th><th>Classification</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Object access</td>
+            <td>Can A fetch B's record by id?</td>
+            <td><span class="pill pill-dyn">probe</span></td>
+            <td class="mono">CWE-639 · API1:2023</td>
+          </tr>
+          <tr>
+            <td>Listing</td>
+            <td>Does A's collection endpoint include B's rows?</td>
+            <td><span class="pill pill-dyn">probe</span></td>
+            <td class="mono">CWE-200 · API1:2023</td>
+          </tr>
+          <tr>
+            <td>Aggregates</td>
+            <td>Do counts and totals reach past A's own data?</td>
+            <td><span class="pill pill-dyn">probe</span></td>
+            <td class="mono">CWE-200 · API1:2023</td>
+          </tr>
+          <tr>
+            <td>Parameter override</td>
+            <td>Does the app trust a client-supplied tenant id?</td>
+            <td><span class="pill pill-dyn">probe</span></td>
+            <td class="mono">CWE-639 · API1:2023</td>
+          </tr>
+          <tr>
+            <td>Mass assignment</td>
+            <td>Can A create or move a record into B?</td>
+            <td><span class="pill pill-dyn">probe</span></td>
+            <td class="mono">CWE-915 · API3:2023</td>
+          </tr>
+          <tr>
+            <td>Cache keys</td>
+            <td>Is a cached value keyed without the tenant?</td>
+            <td><span class="pill pill-stat">static</span></td>
+            <td class="mono">CWE-524</td>
+          </tr>
+          <tr>
+            <td>Scope escapes</td>
+            <td>Raw SQL or a bypass flag stepping around the global filter?</td>
+            <td><span class="pill pill-stat">static</span></td>
+            <td class="mono">CWE-284</td>
+          </tr>
+          <tr>
+            <td>Job payloads</td>
+            <td>Does a background job lose the tenant on its way to the queue?</td>
+            <td><span class="pill pill-stat">static</span></td>
+            <td class="mono">CWE-284</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">
+      <span class="pill pill-dyn">probe</span> findings are reproduced against a
+      running app and reported as confirmed.
+      <span class="pill pill-stat">static</span> findings are suspicions —
+      they're marked as such, and they don't fail your build on their own.
+    </p>
+  </div>
+</section>
+
+<!-- ───────────────────────────── quickstart ───────────────────────────── -->
+<section class="band alt" id="start">
+  <div class="wrap narrow">
+    <h2 class="section-h">Quickstart</h2>
+
+    <h3 class="mini">See it work — one command, nothing to install</h3>
+<pre class="code"><code>git clone https://github.com/halilibrahimd27/tenant-trace
+cd tenant-trace
+docker compose up -d
+
+<span class="cm"># two apps audited over real HTTP; reports at :8088</span></code></pre>
+
+    <h3 class="mini">Point it at your own application</h3>
+<pre class="code"><code><span class="cm"># not on PyPI yet — install from the repository</span>
+pip install git+https://github.com/halilibrahimd27/tenant-trace
+
+<span class="cm"># scaffolds tenanttrace.toml and a seeder stub</span>
+tenanttrace init
+
+<span class="cm"># says exactly what it will do, before it does anything</span>
+tenanttrace validate-config
+tenanttrace probe --dry-run
+
+<span class="cm"># two tenants, one question</span>
+tenanttrace probe
+tenanttrace report --format md</code></pre>
+
+    <h3 class="mini">Run it on every pull request</h3>
+<pre class="code"><code><span class="cm"># .github/workflows/tenant-isolation.yml</span>
+- <span class="k">uses</span>: halilibrahimd27/tenant-trace@v1
+  <span class="k">with</span>:
+    config: tenanttrace.toml
+    fail-on: high
+    baseline: .tenanttrace-baseline.json</code></pre>
+
+    <p class="note">
+      Known findings you've accepted go in the baseline and stay quiet. New ones
+      fail the check. Fingerprints survive re-seeding, endpoint reordering and
+      line-number churn —
+      <a href="https://github.com/halilibrahimd27/tenant-trace/blob/main/docs/adr/0007-baseline-fingerprints.md">here's
+      exactly what goes into the hash</a>, and what deliberately doesn't.
+    </p>
+
+    <!-- The evidence that the thesis shipped. Verbatim output from the
+         bundled demo: two applications with identical routes, audited by the
+         same command. -->
+    <h3 class="section-h" style="font-size:1.05rem;margin-top:2.5rem">
+      What that actually prints
+    </h3>
+    <pre class="code"><code>$ docker compose up -d
+
+── auditing vulnerable at http://vulnerable-app:8000 ──
+run VALID — 10/11 endpoints probed, 30 cross-tenant attempts
+
+ TT-0001  critical  confirmed  param_override      GET /api/customers
+ TT-0002  critical  confirmed  listing_leak        GET /api/documents
+ TT-0003  critical  confirmed  cross_tenant_read   GET /api/invoices/{invoice_id}
+ TT-0004  critical  confirmed  cross_tenant_write  POST /api/invoices
+ TT-0005  high      confirmed  cache_key_leak      GET /api/documents/{document_id}
+ TT-0006  high      confirmed  aggregate_leak      GET /api/stats
+
+6 new confirmed finding(s) at or above high (worst: critical)     exit 1
+
+── auditing safe at http://safe-app:8000 ──
+run VALID — 10/12 endpoints probed, 34 cross-tenant attempts
+Findings: none
+no new confirmed findings at or above high                        exit 0</code></pre>
+
+    <p class="note">
+      Same command, same routes, opposite results — and the clean run reports
+      <em>34 refused attempts</em>, because "no findings" only means something
+      when you can see what was tried.
+    </p>
+  </div>
+</section>
+
+<!-- ───────────────────────────── limits ───────────────────────────── -->
+<section class="band limits">
+  <div class="wrap narrow">
+    <h2 class="section-h">What it won't find</h2>
+    <p class="section-sub">A security tool that only lists its strengths is
+    telling you half of something.</p>
+    <ul class="limits-list">
+      <li><strong>Anything it can't seed.</strong> The oracle works because
+      TenantTrace plants the data it later goes looking for. It can't audit a
+      system you're not allowed to write to.</li>
+      <li><strong>Leaks with no HTTP surface.</strong> If a report generator
+      writes the wrong tenant's rows to a file nobody fetches, probing won't see
+      it. The static engine flags the code path; it can't prove the leak.</li>
+      <li><strong>Routes it never hears about.</strong> Coverage comes from your
+      OpenAPI spec, HAR capture, or route list. Undocumented endpoints stay
+      untested.</li>
+      <li><strong>Sums.</strong> The aggregate oracle checks
+      <span class="mono">*_count</span> fields against the rows it seeded. It
+      deliberately doesn't judge <span class="mono">*_total</span> — that's
+      usually money, and comparing it to a row count would report a critical
+      against correct code.</li>
+      <li><strong>Authorization beyond tenancy.</strong> Whether a viewer can
+      act like an admin <em>within</em> one tenant is a different question, and
+      this tool doesn't ask it.</li>
+      <li><strong>Non-Python codebases, statically.</strong> The prober speaks
+      only HTTP and works against anything. The static engine currently ships
+      one adapter: Python and SQLAlchemy.</li>
+    </ul>
+  </div>
+</section>
+
+</main>
+
+<footer class="foot">
+  <div class="wrap foot-inner">
+    <span>MIT licensed · runs on your machine or your CI · never phones home</span>
+    <span class="foot-links">
+      <a href="https://github.com/halilibrahimd27/tenant-trace">Source</a>
+      <a href="https://github.com/halilibrahimd27/tenant-trace/blob/main/SECURITY.md">Security</a>
+      <a href="https://github.com/halilibrahimd27/tenant-trace/blob/main/docs/adr">Decisions</a>
+    </span>
+  </div>
+</footer>
+
+</body>
+</html>

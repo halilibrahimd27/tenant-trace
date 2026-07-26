@@ -1,0 +1,17 @@
+# Architecture Decision Records
+
+MADR format. One file per decision, numbered sequentially, never edited after
+acceptance — superseded records get a new ADR that points back.
+
+| # | Decision | Status |
+| --- | --- | --- |
+| [0001](0001-use-madr.md) | Use MADR for architecture decisions | accepted |
+| [0002](0002-dynamic-first-architecture.md) | The dynamic prober ships before the static engine | accepted |
+| [0003](0003-canary-oracle.md) | Seeded canaries as the leak oracle | accepted |
+| [0004](0004-hermetic-in-process-auditing.md) | The quality gate audits fixtures in-process, not in containers | accepted |
+| [0005](0005-stdlib-ast-over-tree-sitter.md) | The static engine parses with the stdlib `ast` module | accepted |
+| [0006](0006-seeder-owns-credentials.md) | The seeder's credentials win over configured ones | accepted |
+| [0007](0007-baseline-fingerprints.md) | What goes into a finding's fingerprint | accepted |
+| [0008](0008-differential-attribution.md) | Attacks establish a baseline before claiming a finding | accepted |
+
+Copy [`template.md`](template.md) to start a new one.
