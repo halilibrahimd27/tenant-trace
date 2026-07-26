@@ -1,0 +1,59 @@
+# ── NEVER COMMIT: anything tied to a real target ──────────────────────
+#
+# NOTE ON SYNTAX: gitignore has no trailing comments. A line like
+#   .tenanttrace/    # run artifacts
+# is a pattern containing spaces and a hash — it matches nothing, and the rule
+# silently does not exist. Every comment here is therefore on its own line.
+# (This exact mistake shipped in an earlier draft of this file and would have
+# published real findings.)
+
+# real base_url + the names of your credential env vars
+tenanttrace.toml
+
+# run artifacts: discovered leaks, request/response pairs, canaries
+.tenanttrace/
+
+# docker compose demo output — findings, not source
+reports/
+
+# your per-app seeder adapters, except the documented example
+seeders/*.py
+!seeders/example_seeder.py
+
+*.har
+*.postman_collection.json
+
+# NOTE: `.tenanttrace-baseline.json` is intentionally NOT ignored. The baseline
+# is the list of findings a team has consciously accepted, so it belongs in the
+# repository where its diffs get reviewed. It stores fingerprints and titles
+# only — never canary values, tokens, or response bodies (ADR-0007).
+
+# ── Python ────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# ── Tooling ───────────────────────────────────────────────────────────
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+.hypothesis/
+
+# ── Env / secrets ─────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ── Editors / OS ──────────────────────────────────────────────────────
+.idea/
+.vscode/
+.DS_Store

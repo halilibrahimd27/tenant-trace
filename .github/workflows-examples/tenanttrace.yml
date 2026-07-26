@@ -1,0 +1,31 @@
+# Sample workflow for a project that WANTS to be audited by TenantTrace.
+# Copy this into the target repository as .github/workflows/tenanttrace.yml
+name: tenant-isolation
+
+on: [pull_request]
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_PASSWORD: postgres }
+        options: >-
+          --health-cmd pg_isready --health-interval 10s
+          --health-timeout 5s --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Boot the app under test
+        run: |
+          docker compose up -d --wait
+          # your app must be reachable at the base_url in tenanttrace.toml
+
+      - name: Audit tenant isolation
+        uses: halilibrahimd27/tenant-trace@v1
+        with:
+          config: tenanttrace.toml
+          fail-on: high              # critical | high | medium | low
+          baseline: .tenanttrace-baseline.json
+          comment-on-pr: true

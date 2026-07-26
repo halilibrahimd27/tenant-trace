@@ -1,0 +1,148 @@
+[project]
+name = "tenanttrace"
+version = "0.1.0"
+description = "Multi-tenant isolation auditor — proves whether tenant A can reach tenant B's data."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "halilibrahimd27" }]
+keywords = ["security", "multi-tenant", "bola", "idor", "owasp", "pentest", "sast", "dast"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+]
+
+# Core runtime stays deliberately small.
+#   - The prober speaks HTTP and nothing else, so it needs httpx.
+#   - The static engine PARSES Python with the stdlib `ast` module (ADR-0005),
+#     so neither SQLAlchemy nor tree-sitter belongs here.
+dependencies = [
+    "typer>=0.12",
+    "httpx>=0.27",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "rich>=13.7",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2",
+    "pytest-cov>=5.0",
+    "hypothesis>=6.100",
+    "mypy>=1.10",
+    "ruff>=0.6",
+    "black>=24.4",
+    "types-pyyaml",
+]
+# Only needed to run the bundled fixture applications.
+fixtures = [
+    "fastapi>=0.111",
+    "uvicorn>=0.30",
+    "sqlalchemy>=2.0",
+    "pyjwt>=2.8",
+]
+# Optional: the fixture apps use Redis when REDIS_URL is set and an in-process
+# cache otherwise, so the test suite never needs a Redis server.
+redis = ["redis>=5.0"]
+
+[project.urls]
+Homepage = "https://github.com/halilibrahimd27/tenant-trace"
+Repository = "https://github.com/halilibrahimd27/tenant-trace"
+Issues = "https://github.com/halilibrahimd27/tenant-trace/issues"
+Changelog = "https://github.com/halilibrahimd27/tenant-trace/blob/main/CHANGELOG.md"
+
+[project.scripts]
+tenanttrace = "tenanttrace.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tenanttrace"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/tenanttrace", "README.md", "LICENSE"]
+
+# ---------------------------------------------------------------- ruff
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",   # pycodestyle / pyflakes
+    "I",             # isort
+    "B",             # bugbear
+    "UP",            # pyupgrade
+    "S",             # bandit — security lint matters here
+    "C4", "SIM", "RET", "PTH",
+    "ANN",           # require annotations
+]
+# S101 (assert) is fine in tests.
+# ANN401 (no `Any` in signatures) is wrong for this codebase: the prober reads
+# JSON produced by a target we do not control and the static engine walks
+# arbitrary AST nodes. `Any` is the honest annotation at those boundaries, and
+# mypy --strict still enforces typing discipline everywhere it can be known.
+# (The ANN1xx self/cls rules were removed from ruff upstream — listing them
+# here would be an error, not a suppression.)
+ignore = ["S101", "ANN401"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S", "ANN"]
+# The fixture apps are deliberately vulnerable — linting them for it is noise.
+"fixtures/vulnerable_app/*" = ["S", "ANN", "B"]
+"fixtures/safe_app/*" = ["S", "ANN"]
+"seeders/*" = ["S"]
+
+[tool.black]
+line-length = 100
+target-version = ["py312"]
+
+# ---------------------------------------------------------------- mypy
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+disallow_any_generics = true
+show_error_codes = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["redis.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["fixtures.*", "seeders.*"]
+disallow_untyped_defs = false
+
+# ---------------------------------------------------------------- pytest
+# Coverage flags live in the Makefile's `test` target, not here: baking
+# --cov-fail-under into addopts makes every single-file dev run fail.
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--strict-markers"]
+markers = [
+    "docker: needs the containerised fixtures (make fixtures-up)",
+    "mutating: performs write operations against the target",
+    "property: Hypothesis property test",
+    "slow: runs both engines end to end against both fixtures",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["src/tenanttrace"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@overload",
+]

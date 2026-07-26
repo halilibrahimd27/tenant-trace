@@ -1,0 +1,122 @@
+name: verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The gate. Hermetic by design (ADR-0004): no Docker, no Redis, no network.
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Sync dependencies
+        run: uv sync --extra dev --extra fixtures
+
+      - name: Lint
+        run: make lint
+
+      - name: Types
+        run: make types
+
+      - name: Tests
+        run: make test
+
+      - name: Precision / recall gate
+        run: make metrics
+
+      - name: Upload run artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tenanttrace-run
+          path: .tenanttrace/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # The other half: prove the containerised path works, over real sockets, with
+  # a real Redis. This is what `docker compose up -d` gives a new user, so it is
+  # tested rather than assumed.
+  compose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate the compose file
+        run: docker compose config --quiet
+
+      - name: Bring the whole thing up with one command
+        run: docker compose up -d --wait --wait-timeout 300
+
+      - name: The audit container must have produced both reports
+        run: |
+          docker compose logs audit
+          test -f reports/index.html
+          test -f reports/vulnerable/report.json
+          test -f reports/safe/report.json
+
+      - name: The vulnerable app must have leaked, the safe app must not
+        run: |
+          python - <<'PY'
+          import json, sys
+
+          vulnerable = json.load(open("reports/vulnerable/report.json"))
+          safe = json.load(open("reports/safe/report.json"))
+
+          def confirmed(report):
+              return [f for f in report["findings"] if f["confidence"] == "confirmed"]
+
+          problems = []
+          if vulnerable["status"] != "valid":
+              problems.append("vulnerable run was not VALID")
+          if safe["status"] != "valid":
+              problems.append("safe run was not VALID")
+          if len(confirmed(vulnerable)) < 6:
+              problems.append(f"expected >=6 confirmed findings, got {len(confirmed(vulnerable))}")
+          if confirmed(safe):
+              problems.append(f"safe app produced false positives: {confirmed(safe)}")
+
+          for line in problems:
+              print(f"::error::{line}")
+          sys.exit(1 if problems else 0)
+          PY
+
+      - name: The report server must be serving
+        run: curl -fsS http://127.0.0.1:8088/ > /dev/null
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
+  # The published CLI image must not carry the deliberately vulnerable fixtures.
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the runtime image
+        run: docker build --target runtime -t tenanttrace:ci .
+      - name: It runs, as a non-root user, without fixture code
+        run: |
+          docker run --rm tenanttrace:ci version
+          test "$(docker run --rm --entrypoint id tenanttrace:ci -u)" != "0"
+          if docker run --rm --entrypoint sh tenanttrace:ci -c 'ls /app/fixtures' 2>/dev/null; then
+            echo "::error::the runtime image contains the deliberately vulnerable fixtures"
+            exit 1
+          fi

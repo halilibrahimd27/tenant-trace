@@ -1,0 +1,86 @@
+# One command, end to end:
+#
+#     docker compose up -d
+#
+# It boots two multi-tenant applications — one deliberately leaky, one
+# correctly isolated — audits both over real HTTP, and serves the resulting
+# reports at http://127.0.0.1:8088.
+#
+# Everything binds to loopback. The vulnerable application is insecure by
+# design and must never be reachable from a network you do not control.
+name: tenanttrace
+
+services:
+  # ------------------------------------------------------------------ redis
+  # The fixture apps use Redis when REDIS_URL is set. That is what makes the
+  # cache-key demonstration real rather than a simulation.
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports: ["127.0.0.1:6390:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+
+  # --------------------------------------------------- the application under test
+  vulnerable-app:
+    build: { context: ., target: demo }
+    image: tenanttrace-demo:local
+    restart: unless-stopped
+    command: >-
+      uvicorn fixtures.vulnerable_app.main:app --host 0.0.0.0 --port 8000
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: fixture-only-never-use-this-secret-value
+    ports: ["127.0.0.1:8001:8000"]
+    depends_on:
+      redis: { condition: service_healthy }
+
+  safe-app:
+    build: { context: ., target: demo }
+    image: tenanttrace-demo:local
+    restart: unless-stopped
+    command: >-
+      uvicorn fixtures.safe_app.main:app --host 0.0.0.0 --port 8000
+    environment:
+      REDIS_URL: redis://redis:6379/1
+      JWT_SECRET: fixture-only-never-use-this-secret-value
+    ports: ["127.0.0.1:8002:8000"]
+    depends_on:
+      redis: { condition: service_healthy }
+
+  # ------------------------------------------------------------------ the audit
+  # Runs once and exits. Findings do not fail this container: the demo's job is
+  # to produce a report, and the vulnerable app is *supposed* to fail.
+  audit:
+    build: { context: ., target: demo }
+    image: tenanttrace-demo:local
+    command: ["bash", "/app/docker/run-demo.sh"]
+    working_dir: /app
+    environment:
+      VULNERABLE_URL: http://vulnerable-app:8000
+      SAFE_URL: http://safe-app:8000
+      REPORT_DIR: /reports
+    volumes:
+      - ./reports:/reports
+    depends_on:
+      vulnerable-app: { condition: service_healthy }
+      safe-app: { condition: service_healthy }
+    restart: "no"
+    # The image's healthcheck probes a web server this container does not run.
+    healthcheck:
+      disable: true
+
+  # ----------------------------------------------------------------- the reports
+  report:
+    image: python:3.12-slim
+    working_dir: /reports
+    command: ["python", "-m", "http.server", "8088", "--bind", "0.0.0.0"]
+    ports: ["127.0.0.1:8088:8088"]
+    volumes:
+      - ./reports:/reports:ro
+    depends_on:
+      audit: { condition: service_completed_successfully }
+    restart: unless-stopped
