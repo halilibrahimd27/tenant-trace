@@ -63,3 +63,6 @@ htmlcov/
 .idea/
 .vscode/
 .DS_Store
+
+# Generated on every Pages deploy by `make demo-site`; see the Makefile.
+/docs/site/report-*.html

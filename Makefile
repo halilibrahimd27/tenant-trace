@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 .PHONY: help install verify lint format types test property metrics \
-        fixtures-up fixtures-down reports demo site release-check clean
+        fixtures-up fixtures-down reports demo demo-site site release-check clean
 
 UV ?= uv
 
@@ -58,7 +58,16 @@ demo:  ## Probe both fixture apps in-process and write HTML reports
 	$(UV) run tenanttrace demo
 
 ## ---------------------------------------------------------------- site
-site:  ## Serve the GitHub Pages landing page locally
+# The published demo reports are generated, never committed: a security tool
+# whose own screenshots show an interface it no longer has is worse than one
+# with no screenshots. The pages workflow runs this on every deploy.
+demo-site: ## Regenerate the demo reports the landing page links to
+	$(UV) run tenanttrace demo --format html
+	@cp .tenanttrace/demo/vulnerable_app.html docs/site/report-leaking.html
+	@cp .tenanttrace/demo/safe_app.html docs/site/report-clean.html
+	@echo "→ docs/site/report-leaking.html · docs/site/report-clean.html"
+
+site: demo-site  ## Serve the GitHub Pages landing page locally
 	@echo "→ http://127.0.0.1:8088"
 	@cd docs/site && python3 -m http.server 8088
 

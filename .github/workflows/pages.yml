@@ -3,7 +3,14 @@ name: pages
 on:
   push:
     branches: [main]
-    paths: ["docs/site/**", ".github/workflows/pages.yml"]
+    # The site embeds a report generated at deploy time, so a change to the
+    # renderer or to the fixture apps changes the site even when nothing under
+    # docs/site/ moved.
+    paths:
+      - "docs/site/**"
+      - "src/tenanttrace/core/report.py"
+      - "fixtures/**"
+      - ".github/workflows/pages.yml"
   workflow_dispatch:
 
 permissions:
@@ -21,14 +28,34 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      # enablement: true turns Pages on via the API when it has never been
-      # configured. Without it the first run of this workflow on a fresh
-      # repository fails with "Get Pages site failed", which is a confusing
-      # error for something that is really just a setting nobody flipped yet.
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Sync dependencies
+        run: uv sync --extra dev --extra fixtures
+
+      # The demo pages are the real renderer's real output against the fixture
+      # apps, produced on every deploy. Committing them instead would mean the
+      # site could show an interface the tool no longer has — and a security
+      # tool whose own screenshots are stale is not a good look.
+      - name: Generate the demo reports
+        run: make demo-site
+
       - uses: actions/configure-pages@v5
         with:
+          # enablement: true turns Pages on via the API when it has never been
+          # configured. Without it the first run of this workflow on a fresh
+          # repository fails with "Get Pages site failed", which is a confusing
+          # error for something that is really just a setting nobody flipped yet.
           enablement: true
       - uses: actions/upload-pages-artifact@v3
         with:
