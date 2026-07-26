@@ -7,8 +7,14 @@
 # (This exact mistake shipped in an earlier draft of this file and would have
 # published real findings.)
 
-# real base_url + the names of your credential env vars
-tenanttrace.toml
+# real base_url + the names of your credential env vars.
+# Anchored to the repo root and covering per-target variants: a config named
+# for one application (tenanttrace.myapp.toml) is exactly as sensitive as the
+# default one, and the narrower pattern let one through.
+# The fixtures' own configs live under fixtures/ and stay tracked.
+/tenanttrace.toml
+/tenanttrace.*.toml
+!/tenanttrace.example.toml
 
 # run artifacts: discovered leaks, request/response pairs, canaries
 .tenanttrace/
