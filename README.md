@@ -1,10 +1,17 @@
 [![verify](https://github.com/halilibrahimd27/tenant-trace/actions/workflows/verify.yml/badge.svg)](https://github.com/halilibrahimd27/tenant-trace/actions/workflows/verify.yml)
+[![release](https://img.shields.io/github/v/release/halilibrahimd27/tenant-trace?color=blue)](https://github.com/halilibrahimd27/tenant-trace/releases)
+[![ghcr](https://img.shields.io/badge/ghcr.io-tenant--trace-blue?logo=docker&logoColor=white)](https://github.com/halilibrahimd27/tenant-trace/pkgs/container/tenant-trace)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](pyproject.toml)
 
 # TenantTrace
 
 **Proves whether tenant A can reach tenant B's data.**
+
+A multi-tenant isolation auditor for SaaS applications: it finds broken object
+level authorization ([OWASP API1:2023](https://owasp.org/API-Security/editions/2023/en/0xa1-broken-object-level-authorization/),
+CWE-639) across tenants and proves each finding with evidence, so the report
+can gate a merge instead of starting an argument.
 
 Your test suite runs as one tenant, so the one query that forgot its tenant
 filter looks fine. TenantTrace seeds two tenants into your application, asks for
@@ -94,6 +101,27 @@ default — that is what keeps the gate tolerable. See
 The static engine parses with the standard library's `ast`. It never imports or
 executes the code under analysis
 ([ADR-0005](docs/adr/0005-stdlib-ast-over-tree-sitter.md)).
+
+## Why not the tools you already have
+
+Adjacent tools exist and this one is not a replacement for any of them.
+
+| | What it does | Why it does not answer this question |
+| --- | --- | --- |
+| **Semgrep / CodeQL** | Pattern-match "query without a tenant filter" | Static only, so nothing is ever confirmed — and against the repository/service-layer pattern, where the filter lives far from the query, the rule flags every call site. Hundreds of findings, no signal. |
+| **Burp Autorize / AuthMatrix** | Replay your requests with a second identity | Proxy-driven: you browse, it replays. The oracle is *response similarity*, which is noisy in both directions and cannot judge an aggregate at all. It does not run as a merge gate. |
+| **Schemathesis / Dredd** | Property-test an API against its schema | Excellent at schema conformance. Has no concept of tenancy. |
+| **Your test suite** | Everything else | Runs as one tenant, so the query that forgot its filter returns the right answer. |
+
+What is actually different here:
+
+1. **The oracle is exact.** We seed the data we later go looking for, so a finding is true or it isn't — no similarity scoring, no thresholds.
+2. **Static proposes, dynamic proves.** Hypotheses only gate CI once a real request confirmed them. That is what makes the false-positive rate low enough to block a merge on.
+3. **It runs headless.** A merge gate with a baseline file, not an interactive proxy session.
+4. **It crosses layers.** Cache keys, aggregates, and background-job payloads, not only endpoint responses.
+
+If your application has no OpenAPI document, export a HAR from one click-through
+and point TenantTrace at that instead.
 
 ## Wiring it to your app
 
