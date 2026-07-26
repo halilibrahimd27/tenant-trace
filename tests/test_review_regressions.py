@@ -8,6 +8,7 @@ the same host, and never crash an attack module.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,7 @@ from tenanttrace.core.models import (
     Engine,
     Evidence,
     Finding,
+    HttpMethod,
     RunStatus,
     Severity,
     TenantLabel,
@@ -32,6 +34,7 @@ from tenanttrace.core.report import render_html, render_markdown
 from tenanttrace.probe.asgi import SyncASGITransport
 from tenanttrace.probe.oracle import AccessMode, TenantOracle, facts_from_parts
 from tenanttrace.probe.runner import ProbeOptions, run_probe
+from tenanttrace.probe.session import Exchange
 from tests.conftest import make_tenant
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -561,3 +564,79 @@ def test_the_landing_page_does_not_promise_totals() -> None:
     """The aggregate oracle judges counts and deliberately never totals."""
     page = (REPO_ROOT / "docs/site/index.html").read_text(encoding="utf-8")
     assert "counts and totals reach past" not in page
+
+
+# --------------------------------------------------------------------------- #
+# From the first real-world target (a Spring Boot app, per-user ownership)
+# --------------------------------------------------------------------------- #
+
+
+def test_an_ownership_field_proves_a_leak_without_a_canary() -> None:
+    """Plenty of applications offer no writable text field and no entropy in ids.
+
+    Before this signal existed, those applications could not be audited at all:
+    the positive controls could never pass, so every run was INVALID.
+    """
+    from tenanttrace.probe.oracle import TenantOracle
+
+    actor = make_tenant(TenantLabel.A, tenant_id="2", record_ids=("1",))
+    victim = make_tenant(TenantLabel.B, tenant_id="3", record_ids=("2",))
+    oracle = TenantOracle(actor=actor, victim=victim, tenant_columns=("user_id",))
+
+    body = json.dumps([{"id": 7, "userId": 3, "action": "USER_LOGIN"}])
+    decision = oracle.judge(facts_from_parts(status=200, text=body), mode=AccessMode.COLLECTION)
+    assert decision.verdict is Verdict.LEAKED
+    assert decision.matched_ids == ("userId=3",)
+
+
+def test_an_unrelated_numeric_field_is_not_an_ownership_field() -> None:
+    """`{"amount": 3}` is not evidence that tenant 3 owns anything."""
+    from tenanttrace.probe.oracle import TenantOracle
+
+    oracle = TenantOracle(
+        actor=make_tenant(TenantLabel.A, tenant_id="2"),
+        victim=make_tenant(TenantLabel.B, tenant_id="3"),
+        tenant_columns=("user_id",),
+    )
+    body = json.dumps([{"id": 7, "amount": 3, "quantity": 3}])
+    decision = oracle.judge(facts_from_parts(status=200, text=body), mode=AccessMode.COLLECTION)
+    assert decision.verdict is Verdict.ENFORCED
+
+
+def test_a_shared_directory_is_not_a_leak(
+    vulnerable_config, vulnerable_transport: SyncASGITransport
+) -> None:  # type: ignore[no-untyped-def]
+    """The false positive the first real target produced.
+
+    A company-wide expert directory carries `userId` on every row because that
+    is *who the expert is*, not who owns the row. Both tenants are served the
+    same list, so nothing crossed a boundary — and only the differential can
+    tell that apart from a genuine listing leak.
+    """
+    from tenanttrace.probe.attacks.listing import _is_ownership_only, _same_payload
+    from tenanttrace.probe.oracle import OracleDecision
+
+    ownership_only = OracleDecision(
+        verdict=Verdict.LEAKED, reason="…", matched_ids=("userId=3",), matched_canary=None
+    )
+    canary_backed = OracleDecision(
+        verdict=Verdict.LEAKED, reason="…", matched_canary="tt-canary-B-0123456789abcdef"
+    )
+    assert _is_ownership_only(ownership_only) is True
+    # A canary-backed finding must never be downgraded by the differential.
+    assert _is_ownership_only(canary_backed) is False
+
+    shared = json.dumps([{"id": 8, "userId": 8}, {"id": 3, "userId": 3}])
+    left = Exchange(
+        label=TenantLabel.A,
+        method=HttpMethod.GET,
+        url="http://x/api/experts",
+        status=200,
+        request_headers={},
+        request_body=None,
+        response_text=shared,
+        elapsed_ms=1.0,
+    )
+    right = dataclasses.replace(left, label=TenantLabel.B)
+    assert _same_payload(left, right) is True
+    assert _same_payload(left, dataclasses.replace(left, response_text="[]")) is False

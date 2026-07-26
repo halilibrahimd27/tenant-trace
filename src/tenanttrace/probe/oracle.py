@@ -194,6 +194,25 @@ def iter_json_scalars(node: Any, *, depth: int = 0, max_depth: int = 64) -> Iter
         yield str(node)
 
 
+def _normalise_key(key: str) -> str:
+    """``tenantId``, ``tenant_id`` and ``TENANT-ID`` are the same field."""
+    return re.sub(r"[^a-z0-9]", "", key.lower())
+
+
+def _iter_pairs(node: Any, *, depth: int = 0, max_depth: int = 64) -> Iterator[tuple[str, Any]]:
+    """Yield every ``(key, scalar value)`` pair in a decoded document."""
+    if depth > max_depth:
+        return
+    if isinstance(node, Mapping):
+        for key, value in node.items():
+            if isinstance(key, str) and not isinstance(value, (Mapping, list, tuple)):
+                yield key, value
+            yield from _iter_pairs(value, depth=depth + 1, max_depth=max_depth)
+    elif isinstance(node, (list, tuple)):
+        for item in node:
+            yield from _iter_pairs(item, depth=depth + 1, max_depth=max_depth)
+
+
 def _bounded_in_text(needle: str, haystack: str) -> bool:
     """True when ``needle`` appears in ``haystack`` delimited by non-id characters.
 
@@ -291,12 +310,38 @@ class TenantOracle:
 
     actor: TenantContext
     victim: TenantContext
+    tenant_columns: tuple[str, ...] = ("tenant_id",)
     _victim_ids: frozenset[str] = field(init=False, repr=False)
     _actor_ids: frozenset[str] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._victim_ids = frozenset(self.victim.record_ids())
         self._actor_ids = frozenset(self.actor.record_ids())
+
+    # ------------------------------------------------------------------ #
+    def owner_fields(self, facts: ResponseFacts, tenant: TenantContext) -> tuple[str, ...]:
+        """Ownership fields in the response that name ``tenant`` as the owner.
+
+        The third evidence signal, and the one that works where the other two
+        cannot. A canary needs a text field the caller can write and read back;
+        an identifier needs entropy. Plenty of real applications offer neither —
+        no user-writable free text anywhere, and ``Long`` auto-increment primary
+        keys — and until this existed those applications could not be audited at
+        all.
+
+        This is precise where bare id matching was not, because it compares the
+        value stored *under a named ownership key* rather than scanning the body
+        for a number. ``{"userId": 2}`` in a response served to user 3 is
+        conclusive; ``{"amount": 2}`` is not even looked at.
+        """
+        if facts.json_body is None or not tenant.tenant_id:
+            return ()
+        wanted = {_normalise_key(column) for column in self.tenant_columns}
+        found: list[str] = []
+        for key, value in _iter_pairs(facts.json_body):
+            if _normalise_key(key) in wanted and str(value) == tenant.tenant_id:
+                found.append(f"{key}={value}")
+        return tuple(dict.fromkeys(found))
 
     # ------------------------------------------------------------------ #
     # Evidence gathering
@@ -360,6 +405,17 @@ class TenantOracle:
                 ),
                 matched_canary=canaries[0],
                 matched_ids=self.leaked_ids(facts, sent_ids=sent_ids),
+            )
+
+        owned = self.owner_fields(facts, self.victim)
+        if owned:
+            return OracleDecision(
+                verdict=Verdict.LEAKED,
+                reason=(
+                    f"response served to tenant {self.actor.label} carries "
+                    f"{', '.join(owned[:3])}, naming tenant {self.victim.label} as the owner"
+                ),
+                matched_ids=owned,
             )
 
         ids = self.leaked_ids(facts, sent_ids=sent_ids)

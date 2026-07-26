@@ -55,7 +55,7 @@ from tenanttrace.probe.attacks.base import build_path, candidate_ids, resource_n
 from tenanttrace.probe.oracle import TenantOracle, scan_for_markers
 from tenanttrace.probe.recorder import RunRecorder
 from tenanttrace.probe.seeder import SeederAdapter, SeederError, load_seeder, seed_tenant
-from tenanttrace.probe.session import RateLimiter, TenantSession, build_client
+from tenanttrace.probe.session import Exchange, RateLimiter, TenantSession, build_client
 from tenanttrace.probe.spec import EndpointInventory, SpecError, load_inventory
 
 __all__ = ["ProbeOptions", "ProbeOutcome", "run_probe"]
@@ -179,7 +179,13 @@ def run_probe(config: Config, options: ProbeOptions | None = None) -> ProbeOutco
         control_ids: set[str] = set()
         for label in (TenantLabel.A, TenantLabel.B):
             state.controls.append(
-                _self_access_control(sessions[label], tenants[label], inventory, control_ids)
+                _self_access_control(
+                    sessions[label],
+                    tenants[label],
+                    inventory,
+                    control_ids,
+                    config.tenancy.columns(),
+                )
             )
 
         # Warn when the seeder left the harness nothing to work with. With one
@@ -217,7 +223,11 @@ def run_probe(config: Config, options: ProbeOptions | None = None) -> ProbeOutco
                 victim=sessions[victim_label],
                 actor_ctx=tenants[actor_label],
                 victim_ctx=tenants[victim_label],
-                oracle=TenantOracle(actor=tenants[actor_label], victim=tenants[victim_label]),
+                oracle=TenantOracle(
+                    actor=tenants[actor_label],
+                    victim=tenants[victim_label],
+                    tenant_columns=config.tenancy.columns(),
+                ),
                 allow_mutation=opts.allow_mutation and config.probe.allow_mutation,
                 excluded_ids=frozenset(control_ids),
             )
@@ -308,6 +318,7 @@ def _self_access_control(
     tenant: TenantContext,
     inventory: EndpointInventory,
     touched: set[str],
+    tenant_columns: tuple[str, ...] = ("tenant_id",),
 ) -> ControlResult:
     """Assert that a tenant can read its own seeded data.
 
@@ -335,6 +346,19 @@ def _self_access_control(
         )
 
     markers = [tenant.canary, *(r.canary for r in tenant.records if r.canary)]
+    own = TenantOracle(actor=tenant, victim=tenant, tenant_columns=tenant_columns)
+
+    def proves_self_access(exchange: Exchange) -> bool:
+        """Did this response actually return data belonging to this tenant?
+
+        A canary is the strongest signal, but plenty of applications have no
+        field a caller can write and read back. An ownership column naming this
+        tenant proves the same thing, and without it those applications could
+        not clear the controls at all — so every run against them would be
+        INVALID, which is not the same as untestable.
+        """
+        facts = exchange.facts()
+        return bool(scan_for_markers(facts, markers) or own.owner_fields(facts, tenant))
 
     for endpoint in inventory.objects():
         ids = candidate_ids(endpoint, tenant)
@@ -347,7 +371,7 @@ def _self_access_control(
         exchange = session.request(
             endpoint.method, build_path(endpoint, identifier), attack="positive-control"
         )
-        if exchange.ok and scan_for_markers(exchange.facts(), markers):
+        if exchange.ok and proves_self_access(exchange):
             return ControlResult(
                 name=name,
                 passed=True,
@@ -357,7 +381,7 @@ def _self_access_control(
 
     for endpoint in inventory.collections():
         exchange = session.request(endpoint.method, endpoint.path, attack="positive-control")
-        if exchange.ok and scan_for_markers(exchange.facts(), markers):
+        if exchange.ok and proves_self_access(exchange):
             return ControlResult(
                 name=name,
                 passed=True,

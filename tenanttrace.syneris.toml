@@ -1,0 +1,43 @@
+# Audit configuration for SYNERIS (local instance).
+#
+# The ownership boundary here is the user, not a tenant — see
+# seeders/syneris.py. Everything else is the same question.
+
+[target]
+base_url = "http://localhost:8081"
+allowed_hosts = ["localhost", "127.0.0.1"]
+spec = "openapi"
+spec_path = "http://localhost:8081/v3/api-docs"
+timeout_seconds = 15.0
+
+[seeder]
+adapter = "seeders.syneris:SynerisSeeder"
+
+[tenancy]
+column = "user_id"
+scoped_models = ["UserProcessProgress", "StepEvent", "UserUpdateAck", "Notification", "AuditLog"]
+# Admin endpoints are role-gated by design; a non-admin being refused there is
+# correct behaviour, not a finding.
+cross_tenant_allowlist = ["/api/v1/admin/*", "/api/v1/*/admin/*"]
+
+[probe]
+allow_mutation = false
+max_rps = 25.0
+# Excluded because they would end the run rather than test it: logout revokes
+# the session mid-audit, and change-password would lock the account out of
+# every subsequent request.
+exclude_paths = [
+    "/api/v1/auth/logout",
+    "/api/v1/auth/change-password",
+    "/api/v1/auth/refresh",
+    "/v3/api-docs",
+    "/v3/api-docs/*",
+    "/swagger-ui/*",
+    "/actuator/*",
+]
+attacks = ["idor", "listing", "aggregate", "param_override", "cache"]
+
+[report]
+fail_on = "high"
+formats = ["json", "md", "html"]
+out_dir = ".tenanttrace/syneris"

@@ -14,11 +14,29 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
-from tenanttrace.core.models import AttackName, ProbeResult
+from tenanttrace.core.models import AttackName, ProbeResult, Verdict
 from tenanttrace.probe.attacks.base import AttackContext
-from tenanttrace.probe.oracle import AccessMode
+from tenanttrace.probe.oracle import AccessMode, OracleDecision
+from tenanttrace.probe.session import Exchange
 
 __all__ = ["ListingAttack"]
+
+
+def _is_ownership_only(decision: OracleDecision) -> bool:
+    """True when the verdict rests on an ownership field and nothing stronger."""
+    return decision.matched_canary is None and all("=" in marker for marker in decision.matched_ids)
+
+
+def _same_payload(left: Exchange, right: Exchange) -> bool:
+    """True when two responses carry the same data.
+
+    Compared as decoded JSON so key order and whitespace do not matter, and
+    falling back to the raw text for anything that is not JSON.
+    """
+    left_facts, right_facts = left.facts(), right.facts()
+    if left_facts.json_body is not None and right_facts.json_body is not None:
+        return bool(left_facts.json_body == right_facts.json_body)
+    return left.response_text == right.response_text
 
 
 class ListingAttack:
@@ -33,6 +51,35 @@ class ListingAttack:
 
             exchange = ctx.actor.request(endpoint.method, endpoint.path, attack=self.name.value)
             decision = ctx.oracle.judge(exchange.facts(), mode=AccessMode.COLLECTION)
+
+            if decision.leaked and _is_ownership_only(decision):
+                # Ownership-field evidence is the weakest of the three signals
+                # and it has one specific failure mode: a *shared* resource
+                # whose rows carry a `user_id` that refers to somebody rather
+                # than owning the row. A company-wide expert directory listing
+                # `userId: 3` is not tenant 3's private data — it is a phone
+                # book, and every tenant is supposed to see it.
+                #
+                # The differential settles it: if the victim is served the same
+                # rows, nothing crossed a boundary. Only a canary or an
+                # identifier can carry a finding on its own.
+                mirror = ctx.victim.request(endpoint.method, endpoint.path, attack=self.name.value)
+                if mirror.ok and _same_payload(exchange, mirror):
+                    yield ProbeResult(
+                        attack=self.name,
+                        endpoint=endpoint,
+                        actor=ctx.actor_ctx.label,
+                        target=ctx.victim_ctx.label,
+                        verdict=Verdict.ENFORCED,
+                        evidence=exchange.evidence(),
+                        detail=(
+                            "both tenants are served identical rows, so this is shared "
+                            "reference data rather than one tenant's records — the "
+                            f"{decision.matched_ids[0] if decision.matched_ids else 'ownership'} "
+                            "field refers to a person, it does not own the row"
+                        ),
+                    )
+                    continue
 
             evidence = exchange.evidence().model_copy(
                 update={
