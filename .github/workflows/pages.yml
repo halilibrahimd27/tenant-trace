@@ -23,7 +23,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # enablement: true turns Pages on via the API when it has never been
+      # configured. Without it the first run of this workflow on a fresh
+      # repository fails with "Get Pages site failed", which is a confusing
+      # error for something that is really just a setting nobody flipped yet.
       - uses: actions/configure-pages@v5
+        with:
+          enablement: true
       - uses: actions/upload-pages-artifact@v3
         with:
           path: docs/site

@@ -67,6 +67,9 @@ jobs:
       - name: The audit container must have produced both reports
         run: |
           docker compose logs audit
+          # Reports live in a named volume so the demo works as a non-root
+          # user on every platform; pull them onto the runner to inspect.
+          docker compose cp report:/reports ./reports
           test -f reports/index.html
           test -f reports/vulnerable/report.json
           test -f reports/safe/report.json

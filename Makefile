@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 .PHONY: help install verify lint format types test property metrics \
-        fixtures-up fixtures-down demo site release-check clean
+        fixtures-up fixtures-down reports demo site release-check clean
 
 UV ?= uv
 
@@ -45,6 +45,10 @@ fixtures-up:  ## Boot vulnerable_app + safe_app + Redis in Docker
 
 fixtures-down:  ## Tear the fixtures down
 	docker compose -f fixtures/docker-compose.yml down -v
+
+reports:  ## Copy the containerised demo's reports out onto the host
+	docker compose cp report:/reports ./reports
+	@echo "→ ./reports (also served at http://127.0.0.1:8088)"
 
 ## ---------------------------------------------------------------- demo
 demo:  ## End-to-end: static scan + probe + ranked report vs the vulnerable app

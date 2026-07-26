@@ -20,7 +20,10 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 WORKDIR /app
 
 # Dependency metadata first so a source-only change does not reinstall the world.
-COPY pyproject.toml README.md ./
+# tenanttrace.example.toml is force-included into the wheel (see pyproject.toml)
+# so that `tenanttrace init` scaffolds the documented config rather than a bare
+# fallback — the build fails without it, which is how this was noticed.
+COPY pyproject.toml README.md tenanttrace.example.toml ./
 COPY src ./src
 
 # ------------------------------------------------------------------ runtime

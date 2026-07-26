@@ -30,8 +30,12 @@ docker compose up -d
 ```
 
 That boots two multi-tenant applications — one deliberately leaky, one
-correctly isolated — audits both over real HTTP, and serves the reports at
-**http://127.0.0.1:8088**. Nothing else to install.
+correctly isolated — audits both over real HTTP with a real Redis, and serves
+the reports at **http://127.0.0.1:8088**. Nothing else to install.
+
+Reports live in a named volume, so the demo runs as a non-root user on every
+platform. To pull them onto your disk: `make reports` (or
+`docker compose cp report:/reports ./reports`).
 
 Without Docker:
 
