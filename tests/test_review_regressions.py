@@ -540,3 +540,24 @@ def test_a_reused_payload_variable_does_not_hide_a_tenantless_dispatch(tmp_path:
     assert Category.TENANTLESS_JOB_PAYLOAD in categories, [
         f.category.value for f in result.findings
     ]
+
+
+def test_the_landing_page_tags_match_the_severity_table() -> None:
+    """The site listed a CWE the code does not assign."""
+    from tenanttrace.core.models import Category
+    from tenanttrace.core.severity import tags_for
+
+    page = (REPO_ROOT / "docs/site/index.html").read_text(encoding="utf-8")
+    for category in (
+        Category.TENANTLESS_JOB_PAYLOAD,
+        Category.CACHE_KEY_LEAK,
+        Category.CROSS_TENANT_READ,
+    ):
+        cwe = next(tag for tag in tags_for(category) if tag.startswith("CWE-"))
+        assert cwe in page, f"{category.value} is tagged {cwe}, which the page does not mention"
+
+
+def test_the_landing_page_does_not_promise_totals() -> None:
+    """The aggregate oracle judges counts and deliberately never totals."""
+    page = (REPO_ROOT / "docs/site/index.html").read_text(encoding="utf-8")
+    assert "counts and totals reach past" not in page

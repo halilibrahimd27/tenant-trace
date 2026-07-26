@@ -171,7 +171,7 @@
           </tr>
           <tr>
             <td>Aggregates</td>
-            <td>Do counts and totals reach past A's own data?</td>
+            <td>Does a row count reach past A's own data?</td>
             <td><span class="pill pill-dyn">probe</span></td>
             <td class="mono">CWE-200 · API1:2023</td>
           </tr>
@@ -190,8 +190,8 @@
           <tr>
             <td>Cache keys</td>
             <td>Is a cached value keyed without the tenant?</td>
-            <td><span class="pill pill-stat">static</span></td>
-            <td class="mono">CWE-524</td>
+            <td><span class="pill pill-dyn">probe</span> <span class="pill pill-stat">static</span></td>
+            <td class="mono">CWE-524 · API1:2023</td>
           </tr>
           <tr>
             <td>Scope escapes</td>
@@ -203,7 +203,7 @@
             <td>Job payloads</td>
             <td>Does a background job lose the tenant on its way to the queue?</td>
             <td><span class="pill pill-stat">static</span></td>
-            <td class="mono">CWE-284</td>
+            <td class="mono">CWE-639</td>
           </tr>
         </tbody>
       </table>

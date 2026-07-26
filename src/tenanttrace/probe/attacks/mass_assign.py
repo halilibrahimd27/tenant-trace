@@ -92,7 +92,7 @@ class MassAssignAttack:
                     "note": f"body carried {column}={ctx.victim_ctx.tenant_id}",
                 }
             )
-            cleanup_note = self._cleanup(ctx, endpoint, created_id)
+            cleanup_note = self._cleanup(ctx, endpoint, created_id, accepted=exchange.ok)
             yield ProbeResult(
                 attack=self.name,
                 endpoint=endpoint,
@@ -170,7 +170,14 @@ class MassAssignAttack:
                 return substitute_path(candidate.path, {}, fallback="{}")
         return None
 
-    def _cleanup(self, ctx: AttackContext, endpoint: Endpoint, created_id: str | None) -> str:
+    def _cleanup(
+        self,
+        ctx: AttackContext,
+        endpoint: Endpoint,
+        created_id: str | None,
+        *,
+        accepted: bool = False,
+    ) -> str:
         """Delete what we created, and say plainly when we could not.
 
         The record was written into somebody else's tenant, so leaving it there
@@ -178,6 +185,16 @@ class MassAssignAttack:
         finding rather than logged and forgotten.
         """
         if created_id is None:
+            # The write was accepted but the response carried no id we could
+            # read, so there is a record somewhere — possibly inside the other
+            # tenant — that this run created and cannot remove. Saying nothing
+            # would leave the operator to discover it later, which is the worst
+            # way to find out an audit wrote to their data.
+            if accepted:
+                return (
+                    " (WARNING: the write was accepted but the response exposed no id, so "
+                    "the created record could not be located or removed — check the target)"
+                )
             return ""
         wanted = resource_name(endpoint)
         for candidate in ctx.inventory.endpoints:
