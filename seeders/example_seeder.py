@@ -22,14 +22,18 @@ import httpx
 class ExampleSeeder:
     """Seeds two isolated tenants into a REST application."""
 
-    def __init__(self, client: httpx.Client) -> None:
+    def __init__(self, client: httpx.Client, **_: Any) -> None:
         self.client = client
+        # Kept so cleanup can still authenticate — see the note there.
+        self._tokens: dict[str, str] = {}
 
     def create_tenant(self, label: str) -> dict[str, Any]:
         """Create a tenant and return whatever identifies it downstream."""
         r = self.client.post("/api/signup", json={"company": f"tt-{label}"})
         r.raise_for_status()
-        return {"tenant_id": r.json()["tenant_id"], "token": r.json()["access_token"]}
+        payload = r.json()
+        self._tokens[str(payload["tenant_id"])] = payload["access_token"]
+        return {"tenant_id": payload["tenant_id"], "token": payload["access_token"]}
 
     def auth_headers(self, tenant: dict[str, Any]) -> dict[str, str]:
         """Headers that authenticate a request as this tenant."""
@@ -55,6 +59,18 @@ class ExampleSeeder:
         return created
 
     def cleanup(self, tenant: dict[str, Any]) -> None:
-        """Remove seeded data. Called even when a run fails."""
-        headers = self.auth_headers(tenant)
-        self.client.delete(f"/api/tenants/{tenant['tenant_id']}", headers=headers)
+        """Remove seeded data. Called even when a run fails.
+
+        ``tenant`` here is the tenant's *metadata*, which deliberately excludes
+        credentials so a token cannot reach a run artifact — so this cannot
+        call :meth:`auth_headers`, which needs the token. A seeder that has to
+        authenticate during cleanup keeps its own record of what it created,
+        as this one does.
+        """
+        tenant_id = str(tenant.get("tenant_id", ""))
+        token = self._tokens.get(tenant_id)
+        if not token:
+            return
+        self.client.delete(
+            f"/api/tenants/{tenant_id}", headers={"Authorization": f"Bearer {token}"}
+        )

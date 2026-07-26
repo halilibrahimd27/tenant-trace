@@ -224,8 +224,20 @@ def _canonical(location: str, engine: str) -> str:
 
 
 def _matches(label: Label, finding: Finding) -> bool:
+    """Whether a finding satisfies a label.
+
+    A CORRELATED finding satisfies either kind of label. It *is* the static
+    hypothesis and the confirmed leak, merged — scoring it as a miss made the
+    gate fail precisely when the correlator did its job, which is the opposite
+    of what the metric is for.
+    """
     if label.category != finding.category.value:
         return False
+    if finding.engine is Engine.CORRELATED:
+        return _canonical(label.location, label.engine) in {
+            _canonical(finding.location, "probe"),
+            *(_canonical(r, "static") for r in finding.related),
+        }
     engine = "static" if finding.engine is Engine.STATIC else "probe"
     if label.engine == "static" and engine != "static":
         return False

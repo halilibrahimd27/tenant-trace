@@ -115,11 +115,21 @@ def candidate_ids(
 ) -> tuple[str, ...]:
     """Which of the tenant's record ids are worth sending to this endpoint."""
     kind = resource_name(endpoint)
-    matched = tuple(i for i in tenant.record_ids(kind) if i not in exclude) if kind else ()
+    of_kind = tenant.record_ids(kind) if kind else ()
+    matched = tuple(i for i in of_kind if i not in exclude)
     if matched:
         return matched
+
     remaining = tuple(i for i in tenant.record_ids() if i not in exclude)
-    return remaining[:MAX_BLIND_IDS]
+    if remaining:
+        return remaining[:MAX_BLIND_IDS]
+
+    # Every candidate was used by a positive control, which happens when the
+    # seeder plants a single record per kind. Falling back to those ids is the
+    # lesser evil: the attribution caveat in ADR-0008 costs a category, while
+    # skipping the endpoint costs the finding entirely — and a skipped endpoint
+    # in a report full of enforced results reads like coverage.
+    return of_kind[:MAX_BLIND_IDS] or tenant.record_ids()[:MAX_BLIND_IDS]
 
 
 def build_path(endpoint: Endpoint, identifier: str) -> str:

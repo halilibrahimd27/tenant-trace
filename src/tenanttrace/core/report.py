@@ -170,14 +170,26 @@ def _duration_seconds(report: RunReport) -> float | None:
     return (report.finished_at - report.started_at).total_seconds()
 
 
-INVALID_HEADLINE = "RUN INVALID — the positive controls failed"
+INVALID_HEADLINE = "RUN INVALID — this audit did not happen"
 INVALID_BODY = (
-    "A tenant could not read its own seeded data, so authentication or seeding is "
-    "broken. Nothing in this report is evidence about tenant isolation. In "
-    "particular, an empty finding list here does NOT mean the application is "
-    "clean — it means the application was never successfully tested. Fix the "
-    "harness and run again."
+    "Nothing in this report is evidence about tenant isolation. In particular, an "
+    "empty finding list here does NOT mean the application is clean — it means the "
+    "application was never successfully tested. Fix the harness and run again."
 )
+
+
+def _invalid_reason(report: RunReport) -> str:
+    """Why this run is invalid, in the run's own words.
+
+    A run can be invalid for several reasons — the spec would not load, the
+    seeder failed, every attack crashed, the controls failed — and a banner
+    that always blames the positive controls sends the reader to the wrong
+    place. The harness finding carries the actual reason.
+    """
+    for finding in report.findings:
+        if finding.evidence.note:
+            return finding.evidence.note
+    return report.errors[-1] if report.errors else "the run could not be completed"
 
 
 # --------------------------------------------------------------------------- #
@@ -221,6 +233,8 @@ def render_markdown(report: RunReport, *, redact: bool = True) -> str:
     if prepared.status is not RunStatus.VALID:
         out += [
             f"> ## ⚠ {INVALID_HEADLINE}",
+            ">",
+            *[f"> {line}" for line in _wrap(_invalid_reason(prepared))],
             ">",
             *[f"> {line}" for line in _wrap(INVALID_BODY)],
             "",
@@ -517,6 +531,7 @@ def render_html(report: RunReport, *, redact: bool = True) -> str:
         parts += [
             "<div class='invalid'>",
             f"<h2>⚠ {_e(INVALID_HEADLINE)}</h2>",
+            f"<p><strong>{_e(_invalid_reason(prepared))}</strong></p>",
             f"<p>{_e(INVALID_BODY)}</p>",
             "<ul>" + "".join(f"<li>{_e(err)}</li>" for err in prepared.errors) + "</ul>",
             "</div>",

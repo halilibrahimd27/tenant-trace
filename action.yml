@@ -56,7 +56,7 @@ outputs:
     description: "Number of dynamically confirmed findings"
     value: ${{ steps.probe.outputs.confirmed-count }}
   status:
-    description: "VALID | INVALID (INVALID = positive controls failed)"
+    description: "VALID | INVALID (INVALID = the audit could not be trusted)"
     value: ${{ steps.probe.outputs.status }}
   exit-code:
     description: "0 clean · 1 findings gated · 2 usage error · 3 run INVALID"
@@ -95,7 +95,7 @@ runs:
       shell: bash
       run: |
         set +e
-        args=(--config "${{ inputs.config }}")
+        args=(--config "${{ inputs.config }}" --fail-on "${{ inputs.fail-on }}")
         [ -n "${{ inputs.base-url }}" ] && args+=(--base-url "${{ inputs.base-url }}")
         [ -n "${{ inputs.baseline }}" ] && [ -f "${{ inputs.baseline }}" ] && args+=(--baseline "${{ inputs.baseline }}")
         [ "${{ inputs.allow-mutation }}" = "true" ] && args+=(--allow-mutation)
@@ -109,13 +109,9 @@ runs:
         echo "findings=$report" >> "$GITHUB_OUTPUT"
 
         if [ -n "$report" ]; then
-          python - "$report" <<'PY' >> "$GITHUB_OUTPUT"
-        import json, sys
-        data = json.load(open(sys.argv[1]))
-        confirmed = [f for f in data.get("findings", []) if f.get("confidence") == "confirmed"]
-        print(f"confirmed-count={len(confirmed)}")
-        print(f"status={'VALID' if data.get('status') == 'valid' else 'INVALID'}")
-        PY
+          # A one-liner, not a heredoc: the previous version indented its `PY`
+          # terminator, which `<<'PY'` never matches, so the block ran away.
+          python -c 'import json,sys; d=json.load(open(sys.argv[1])); c=[f for f in d.get("findings",[]) if f.get("confidence")=="confirmed"]; print("confirmed-count=%d" % len(c)); print("status=%s" % ("VALID" if d.get("status")=="valid" else "INVALID"))' "$report" >> "$GITHUB_OUTPUT"
         else
           echo "confirmed-count=0" >> "$GITHUB_OUTPUT"
           echo "status=INVALID" >> "$GITHUB_OUTPUT"
@@ -125,23 +121,19 @@ runs:
     - name: Job summary
       if: always()
       shell: bash
+      # `tenanttrace summary` deliberately omits response bodies. A job summary
+      # is readable by anyone who can see the run, and on a real target those
+      # bodies are another tenant's data.
       run: |
-        report="${{ steps.probe.outputs.findings }}"
-        {
-          echo "## TenantTrace"
-          if [ "${{ steps.probe.outputs.status }}" != "VALID" ]; then
+        if [ -n "${{ steps.probe.outputs.findings }}" ]; then
+          tenanttrace summary --run "${{ steps.probe.outputs.findings }}" >> "$GITHUB_STEP_SUMMARY"
+        else
+          {
+            echo "### TenantTrace"
             echo
-            echo "> **RUN INVALID** — the positive controls failed, so this run says nothing"
-            echo "> about tenant isolation. It is not a clean result; it is an untested"
-            echo "> application. Fix the harness and run again."
-            echo
-          fi
-          if [ -n "$report" ]; then
-            tenanttrace report --run "$report" --format md 2>/dev/null || cat /tmp/tenanttrace-probe.log
-          else
-            cat /tmp/tenanttrace-probe.log
-          fi
-        } >> "$GITHUB_STEP_SUMMARY"
+            echo "No report was produced — see the workflow log."
+          } >> "$GITHUB_STEP_SUMMARY"
+        fi
 
     - name: Comment on the pull request
       if: inputs.comment-on-pr == 'true' && github.event_name == 'pull_request'
@@ -149,44 +141,13 @@ runs:
       env:
         GH_TOKEN: ${{ github.token }}
       run: |
-        # Deliberately NOT the full report: canary values and response bodies must
-        # never reach a comment that is public on a public repository.
         report="${{ steps.probe.outputs.findings }}"
-        body=$(python - "$report" <<'PY'
-        import json, sys
-        try:
-            data = json.load(open(sys.argv[1]))
-        except Exception:
-            print("TenantTrace produced no report — check the workflow log."); raise SystemExit
-        status = data.get("status", "unknown")
-        findings = data.get("findings", [])
-        confirmed = [f for f in findings if f.get("confidence") == "confirmed"]
-        lines = ["### TenantTrace — tenant isolation audit", ""]
-        if status != "valid":
-            lines += ["> **RUN INVALID.** Positive controls failed: a tenant could not read its",
-                      "> own seeded data. Nothing below is evidence of isolation.", ""]
-        counts: dict[str, int] = {}
-        for f in confirmed:
-            counts[f["severity"]] = counts.get(f["severity"], 0) + 1
-        order = ["critical", "high", "medium", "low", "info"]
-        summary = " · ".join(f"**{counts[s]}** {s}" for s in order if counts.get(s))
-        lines.append(f"{len(confirmed)} confirmed finding(s)" + (f": {summary}" if summary else ""))
-        lines.append(f"Coverage: {data.get('endpoints_tested', 0)} of "
-                     f"{data.get('endpoints_discovered', 0)} endpoints, "
-                     f"{len(data.get('results', []))} cross-tenant attempts.")
-        if confirmed:
-            lines += ["", "| severity | category | location |", "| --- | --- | --- |"]
-            for f in confirmed:
-                lines.append(f"| {f['severity']} | {f['category']} | `{f['location']}` |")
-        suspected = [f for f in findings if f.get("confidence") == "suspected"]
-        if suspected:
-            lines += ["", f"{len(suspected)} static hypothes(es) reported; they do not gate this build."]
-        lines += ["", "<sub>Evidence and canary values are in the workflow artifact, not here.</sub>"]
-        print("\n".join(lines))
-        PY
-        )
-        gh pr comment "${{ github.event.pull_request.number }}" --body "$body" --edit-last --create-if-none \
-          || gh pr comment "${{ github.event.pull_request.number }}" --body "$body"
+        [ -z "$report" ] && exit 0
+        tenanttrace summary --run "$report" > /tmp/tenanttrace-comment.md
+        gh pr comment "${{ github.event.pull_request.number }}" \
+          --body-file /tmp/tenanttrace-comment.md --edit-last --create-if-none \
+          || gh pr comment "${{ github.event.pull_request.number }}" \
+               --body-file /tmp/tenanttrace-comment.md
 
     - name: Upload run artifacts
       if: always() && inputs.upload-artifacts == 'true'
@@ -205,7 +166,7 @@ runs:
           0) echo "✅ no findings at or above ${{ inputs.fail-on }}" ;;
           1) echo "::error::TenantTrace found confirmed cross-tenant findings at or above ${{ inputs.fail-on }}" ;;
           2) echo "::error::TenantTrace configuration error — see the log" ;;
-          3) echo "::error::TenantTrace run INVALID: positive controls failed. This is NOT a clean result." ;;
+          3) echo "::error::TenantTrace run INVALID — the audit did not happen. This is NOT a clean result; see the job summary for why." ;;
           *) echo "::error::TenantTrace exited with $code" ;;
         esac
         exit "$code"

@@ -399,6 +399,33 @@ class TenantOracle:
         """Read a response that carried no victim data at all."""
         truncated = " (body truncated before scanning)" if facts.truncated else ""
 
+        # A body we only partly read cannot support "nothing of the victim's is
+        # in here" — the part we skipped is exactly where it might be. Silence
+        # from a truncated scan is an unknown, not enforcement.
+        if facts.truncated:
+            return OracleDecision(
+                verdict=Verdict.INCONCLUSIVE,
+                reason=(
+                    f"response exceeded the {MAX_SCAN_BYTES // (1024 * 1024)} MiB scan limit, "
+                    "so the unscanned remainder could contain the other tenant's data; this "
+                    "is not evidence of isolation"
+                ),
+            )
+
+        # A redirect is not a refusal. `Location: /login` might be, but so might
+        # `303 -> /api/invoices/<id>`, which is the object being served one hop
+        # later. Counting every 3xx as "correctly refused" inflated coverage
+        # with attempts that were never actually resolved.
+        if 300 <= status < 400:
+            return OracleDecision(
+                verdict=Verdict.INCONCLUSIVE,
+                reason=(
+                    f"target answered {status} with a redirect, which was not followed "
+                    "(a redirect can leave allowed_hosts). Whether the destination "
+                    "serves the object is unknown."
+                ),
+            )
+
         if mode is AccessMode.OBJECT:
             if status in {401, 403, 404}:
                 return OracleDecision(

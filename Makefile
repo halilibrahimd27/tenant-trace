@@ -39,19 +39,22 @@ metrics:  ## Precision/recall against fixtures/labels.yaml (recall >= 90%)
 
 ## ------------------------------------------------------------ fixtures
 # Containers are for demoing over real sockets. The gate does not need them.
+# The compose file lives at the repository root — it is the whole product's
+# one-command demo, not a fixtures-only detail. These targets pointed at
+# fixtures/docker-compose.yml, which has not existed since it moved.
 fixtures-up:  ## Boot vulnerable_app + safe_app + Redis in Docker
-	docker compose -f fixtures/docker-compose.yml up -d --wait
+	docker compose up -d --wait vulnerable-app safe-app redis
 	@echo "vulnerable_app → http://127.0.0.1:8001   safe_app → http://127.0.0.1:8002"
 
 fixtures-down:  ## Tear the fixtures down
-	docker compose -f fixtures/docker-compose.yml down -v
+	docker compose down -v
 
 reports:  ## Copy the containerised demo's reports out onto the host
 	docker compose cp report:/reports ./reports
 	@echo "→ ./reports (also served at http://127.0.0.1:8088)"
 
 ## ---------------------------------------------------------------- demo
-demo:  ## End-to-end: static scan + probe + ranked report vs the vulnerable app
+demo:  ## Probe both fixture apps in-process and write HTML reports
 	$(UV) run tenanttrace demo
 
 ## ---------------------------------------------------------------- site

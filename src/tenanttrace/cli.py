@@ -23,6 +23,7 @@ from typing import Annotated
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from tenanttrace import __version__
@@ -66,24 +67,35 @@ ConfigOption = Annotated[Path, typer.Option("--config", "-c", help="Path to tena
 # --------------------------------------------------------------------------- #
 
 
-def _load(config_path: Path, *, base_url: str | None = None, out_dir: Path | None = None) -> Config:
+def _load(
+    config_path: Path,
+    *,
+    base_url: str | None = None,
+    out_dir: Path | None = None,
+    fail_on: str | None = None,
+) -> Config:
     overrides: dict[str, dict[str, object]] = {}
     if base_url:
         overrides["target"] = {"base_url": base_url}
+    report: dict[str, object] = {}
     if out_dir:
-        overrides["report"] = {"out_dir": str(out_dir)}
+        report["out_dir"] = str(out_dir)
+    if fail_on:
+        report["fail_on"] = fail_on
+    if report:
+        overrides["report"] = report
     try:
         config = load_config(config_path, overrides=overrides or None)
     except ConfigError as exc:
-        err.print(f"[bold red]configuration error[/]\n{exc}")
+        err.print(f"[bold red]configuration error[/]\n{escape(str(exc))}")
         raise typer.Exit(EXIT_USAGE) from exc
     if base_url:
         # A --base-url the operator typed still has to clear allowed_hosts.
         host = config.target.host
         if not config.target.host_allowed():
             err.print(
-                f"[bold red]--base-url {base_url} resolves to host {host!r}, which is not in "
-                f"[target] allowed_hosts.[/]"
+                f"[bold red]--base-url {base_url} resolves to host {host!r}, which is not "
+                f"in the configured allowed_hosts.[/]"
             )
             raise typer.Exit(EXIT_USAGE)
     return config
@@ -126,12 +138,12 @@ def _print_status(report: RunReport) -> None:
         )
         return
     err.print(
-        "[bold white on red] RUN INVALID [/] the positive controls failed, so this run says "
-        "NOTHING about tenant isolation.\nIt is not a clean result — it is an untested "
-        "application. Fix the harness and run again."
+        "[bold white on red] RUN INVALID [/] this audit did not happen, so it says NOTHING "
+        "about tenant isolation.\nIt is not a clean result — it is an untested application. "
+        "Fix the harness and run again."
     )
     for error in report.errors:
-        err.print(f"  • {error}")
+        err.print(f"  • {escape(error)}")
 
 
 def _emit_reports(config: Config, report: RunReport, *, redact: bool) -> list[Path]:
@@ -146,6 +158,44 @@ def _emit_reports(config: Config, report: RunReport, *, redact: bool) -> list[Pa
     for path in written:
         console.print(f"  report → {path}")
     return list(written)
+
+
+def _correlate_with_static(report: RunReport, config: Config, scan_path: Path | None) -> RunReport:
+    """Merge static hypotheses into a probe report, when a source tree is known.
+
+    This is what makes the correlated finding the README describes reachable
+    from the command line: before, `probe` and `scan` were separate commands
+    whose outputs never met, so `Engine.CORRELATED` could only be produced by
+    calling the library directly.
+    """
+    path = scan_path or (Path(config.static.path) if config.static.path else None)
+    if path is None:
+        return report
+    if not path.exists():
+        err.print(f"[yellow]static path {path} does not exist — skipping the static pass[/]")
+        return report
+
+    from tenanttrace.correlate.linker import correlate
+    from tenanttrace.static.engine import scan as scan_source
+
+    try:
+        result = scan_source(path, config)
+    except Exception as exc:  # noqa: BLE001 - a static failure must not lose the probe run
+        err.print(f"[yellow]static scan failed: {escape(f'{type(exc).__name__}: {exc}')}[/]")
+        return report
+
+    merged = correlate(list(report.findings), list(result.findings))
+    console.print(
+        f"  static: {result.files_scanned} file(s), scoping {result.scoping.mode.value}, "
+        f"{len(result.findings)} hypothes(es), {len(merged.links)} correlated"
+    )
+    return report.model_copy(
+        update={
+            "findings": merged.findings,
+            "scoping_mode": result.scoping.mode,
+            "errors": (*report.errors, *result.warnings),
+        }
+    )
 
 
 def _gate(config: Config, report: RunReport, baseline_path: Path | None) -> int:
@@ -164,7 +214,7 @@ def _gate(config: Config, report: RunReport, baseline_path: Path | None) -> int:
         baseline=baseline,
     )
     style = "red" if decision.failed else "green"
-    console.print(f"[{style}]{decision.message}[/]")
+    console.print(f"[{style}]{escape(decision.message)}[/]")
     return EXIT_FINDINGS if decision.failed else EXIT_OK
 
 
@@ -180,6 +230,10 @@ def probe(
         str | None, typer.Option("--base-url", help="Override [target] base_url")
     ] = None,
     out_dir: Annotated[Path | None, typer.Option("--out", help="Override [report] out_dir")] = None,
+    fail_on: Annotated[
+        str | None,
+        typer.Option("--fail-on", help="Override [report] fail_on: critical|high|medium|low|none"),
+    ] = None,
     allow_mutation: Annotated[
         bool,
         typer.Option("--allow-mutation", help="Enable attacks that WRITE to the target"),
@@ -192,7 +246,12 @@ def probe(
         ),
     ] = False,
     dry_run: Annotated[
-        bool, typer.Option("--dry-run", help="List what would be attempted; send nothing")
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="List what would be attempted. Sends no attack traffic (it does\n"
+            "fetch the API description).",
+        ),
     ] = False,
     full_evidence: Annotated[
         bool,
@@ -201,14 +260,27 @@ def probe(
     baseline: Annotated[
         Path | None, typer.Option("--baseline", help="Baseline file of accepted findings")
     ] = None,
+    scan_path: Annotated[
+        Path | None,
+        typer.Option("--scan", help="Source tree to analyse; defaults to [static] path"),
+    ] = None,
+    no_correlate: Annotated[
+        bool, typer.Option("--no-correlate", help="Skip the static pass entirely")
+    ] = False,
     no_report: Annotated[
         bool, typer.Option("--no-report", help="Skip writing rendered reports")
     ] = False,
 ) -> None:
-    """Run the dynamic prober against a target."""
+    """Run the dynamic prober against a target.
+
+    When a source tree is configured, the static engine runs too and its
+    hypotheses are correlated with the confirmed leaks — so one report carries
+    both the endpoint that leaked and the line responsible. Static findings
+    stay `suspected` and never gate the build (rule 3).
+    """
     from tenanttrace.probe.runner import ProbeOptions, run_probe
 
-    config = _load(config_path, base_url=base_url, out_dir=out_dir)
+    config = _load(config_path, base_url=base_url, out_dir=out_dir, fail_on=fail_on)
     redact = config.report.redact_evidence and not full_evidence
 
     try:
@@ -222,7 +294,7 @@ def probe(
             ),
         )
     except ConfigError as exc:
-        err.print(f"[bold red]refused to probe[/]\n{exc}")
+        err.print(f"[bold red]refused to probe[/]\n{escape(str(exc))}")
         raise typer.Exit(EXIT_USAGE) from exc
 
     if dry_run:
@@ -232,6 +304,9 @@ def probe(
         raise typer.Exit(EXIT_OK)
 
     report = outcome.report
+    if not no_correlate:
+        report = _correlate_with_static(report, config, scan_path)
+
     _print_status(report)
     _print_findings(list(report.ranked()), title="Findings")
     if outcome.artifact_dir:
@@ -275,7 +350,7 @@ def scan(
     for reason in result.scoping.reasons[:5]:
         console.print(f"  • {reason}")
     for warning in result.warnings[:10]:
-        err.print(f"  [yellow]warning[/] {warning}")
+        err.print(f"  [yellow]warning[/] {escape(warning)}")
     _print_findings(sorted(result.findings, key=lambda f: f.sort_key), title="Hypotheses")
     console.print(
         "\n[dim]These are hypotheses, not verdicts. Run `tenanttrace probe` to confirm "
@@ -339,6 +414,83 @@ def _resolve_run(run: Path | None, config: Config | None) -> Path | None:
 # --------------------------------------------------------------------------- #
 # metrics
 # --------------------------------------------------------------------------- #
+
+
+@app.command()
+def summary(
+    run: Annotated[
+        Path | None, typer.Option("--run", help="Run directory or report.json (default: latest)")
+    ] = None,
+    config_path: ConfigOption = Path("tenanttrace.toml"),
+) -> None:
+    """Print a summary safe to publish in a public CI log or PR comment.
+
+    Deliberately not the full report. A job summary and a pull-request comment
+    on a public repository are readable by anyone, and the full report contains
+    response bodies — which, on a real target, are another tenant's data. This
+    prints counts, categories, locations, and status: enough to act on, and not
+    enough to hand a passer-by a working exploit with the data attached.
+    """
+    from tenanttrace.core.report import read_report
+
+    config = _load(config_path) if config_path.exists() else None
+    source = _resolve_run(run, config)
+    if source is None:
+        err.print("[bold red]no run found.[/] Run `tenanttrace probe` first.")
+        raise typer.Exit(EXIT_USAGE)
+
+    stored = read_report(source)
+    lines = ["### TenantTrace — tenant isolation audit", ""]
+
+    if stored.status is not RunStatus.VALID:
+        reason = next(
+            (f.evidence.note for f in stored.findings if f.evidence.note),
+            "the run could not be completed",
+        )
+        lines += [
+            f"> **RUN INVALID.** {reason}",
+            ">",
+            "> Nothing below is evidence of isolation. An empty finding list here does",
+            "> not mean the application is clean; it means it was never tested.",
+            "",
+        ]
+
+    confirmed = list(stored.confirmed)
+    counts: dict[str, int] = {}
+    for finding in confirmed:
+        counts[finding.severity.value] = counts.get(finding.severity.value, 0) + 1
+    order = ["critical", "high", "medium", "low", "info"]
+    histogram = " · ".join(f"**{counts[s]}** {s}" for s in order if counts.get(s))
+
+    lines.append(f"{len(confirmed)} confirmed finding(s)" + (f": {histogram}" if histogram else ""))
+    lines.append(
+        f"Coverage: {stored.endpoints_tested} of {stored.endpoints_discovered} known "
+        f"endpoints, {len(stored.results)} cross-tenant attempts."
+    )
+
+    if confirmed:
+        lines += ["", "| severity | category | location |", "| --- | --- | --- |"]
+        lines += [
+            f"| {f.severity.value} | {f.category.value} | `{f.location}` |" for f in confirmed
+        ]
+
+    suspected = list(stored.suspected)
+    if suspected:
+        lines += [
+            "",
+            f"{len(suspected)} static hypothes(es) reported; they do not gate this build.",
+        ]
+    if stored.errors:
+        lines += ["", "<details><summary>Run notes</summary>", ""]
+        lines += [f"- {e}" for e in stored.errors]
+        lines += ["", "</details>"]
+
+    lines += [
+        "",
+        "<sub>Evidence, response bodies and canary values are in the run artifact, "
+        "not here.</sub>",
+    ]
+    sys.stdout.write("\n".join(lines) + "\n")
 
 
 @app.command()

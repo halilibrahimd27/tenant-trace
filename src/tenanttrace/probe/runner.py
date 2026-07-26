@@ -182,6 +182,20 @@ def run_probe(config: Config, options: ProbeOptions | None = None) -> ProbeOutco
                 _self_access_control(sessions[label], tenants[label], inventory, control_ids)
             )
 
+        # Warn when the seeder left the harness nothing to work with. With one
+        # record per kind, control reads and attack reads share an object, and
+        # a tenant-less cache can then make a correctly-scoped endpoint look
+        # like a plain IDOR (ADR-0008).
+        for label, tenant in tenants.items():
+            kinds = {record.kind for record in tenant.records}
+            thin = sorted(k for k in kinds if tenant.count_of(k) < 2)
+            if thin:
+                state.errors.append(
+                    f"tenant {label.value} has only one record of: {', '.join(thin)}. "
+                    "Seed at least two per kind — the harness keeps control reads and "
+                    "attack reads on different records, and cannot here."
+                )
+
         if not all(control.passed for control in state.controls):
             invalid_reason = (
                 "positive controls failed: a tenant could not read its own seeded data. "
@@ -216,16 +230,32 @@ def run_probe(config: Config, options: ProbeOptions | None = None) -> ProbeOutco
         # this run created could be counted as a row the application leaked.
         # Every read-only attack now finishes, in both directions, before
         # anything writes.
+        attempted = 0
+        crashed = 0
         for attack in attacks:
             for actor_label, _ in _DIRECTIONS:
+                attempted += 1
                 try:
                     for result in attack.run(contexts[actor_label]):
                         state.results.append(result)
                         state.endpoints_tested.add(result.endpoint.key)
                 except Exception as exc:  # noqa: BLE001 - one attack must not end the run
+                    crashed += 1
                     state.errors.append(
                         f"attack {attack.name.value} raised {type(exc).__name__}: {exc}"
                     )
+
+        # A run in which every attack crashed produced no results, and "no
+        # results" renders identically to "nothing leaked". One attack failing
+        # is a gap worth noting; all of them failing means the audit did not
+        # happen, and reporting that as a clean VALID run is the exact failure
+        # RunStatus.INVALID exists to prevent.
+        if attempted and crashed == attempted:
+            invalid_reason = (
+                f"every attack module failed ({crashed}/{attempted}). No cross-tenant "
+                "access was ever attempted, so this run is not evidence of isolation."
+            )
+            raise _Abort
 
         findings = _findings_from(state.results, config)
 
@@ -481,7 +511,7 @@ def _invalid_report(
     harness_finding = with_fingerprint(
         Finding(
             id="TT-0000",
-            title="Run INVALID — the audit could not be trusted",
+            title=f"Run INVALID — {reason.split('.')[0].split(':')[0]}",
             category=Category.HARNESS_ERROR,
             severity=Severity.INFO,
             confidence=Confidence.INCONCLUSIVE,

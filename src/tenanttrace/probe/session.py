@@ -133,14 +133,24 @@ def build_client(
 ) -> httpx.Client:
     """Build the HTTP client every session shares.
 
-    Redirects are not followed. A redirect can move a request to a host outside
-    ``allowed_hosts``, and silently obeying it would route around the one
-    safety rail the operator explicitly configured.
+    Two defaults here exist to keep traffic where the operator put it.
+
+    **Redirects are not followed.** A redirect can move a request to a host
+    outside ``allowed_hosts``, and silently obeying it would route around the
+    one safety rail the operator explicitly configured.
+
+    **The environment is not trusted.** httpx honours ``HTTP_PROXY`` and
+    ``HTTPS_PROXY`` by default, which would route two tenants' credentials and
+    another tenant's leaked data through whatever a shell variable named — on
+    a laptop with a debugging proxy left exported, or on a CI runner with an
+    egress proxy. ``allowed_hosts`` says where requests may go; an inherited
+    proxy quietly makes that untrue.
     """
     return httpx.Client(
         base_url=config.target.base_url,
         timeout=config.target.timeout_seconds,
         follow_redirects=False,
+        trust_env=False,
         transport=transport,
         headers={
             "User-Agent": "tenanttrace/0.1 (+https://github.com/halilibrahimd27/tenant-trace)"

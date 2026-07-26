@@ -41,6 +41,16 @@ class ConfigError(Exception):
     """Raised with a message meant to be printed straight to the operator."""
 
 
+def _is_loopback(host: str) -> bool:
+    """True when a hostname refers to this machine."""
+    if host in LOOPBACK_HOSTS:
+        return True
+    try:
+        return ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 class _Section(BaseModel):
     # extra="forbid" turns a typo into an error naming the key, instead of a
     # setting that silently does nothing for the next six months.
@@ -80,13 +90,7 @@ class TargetConfig(_Section):
         Loopback targets are the safe default: probing them cannot reach a
         system somebody else depends on.
         """
-        host = self.host
-        if host in LOOPBACK_HOSTS:
-            return True
-        try:
-            return ip_address(host).is_loopback
-        except ValueError:
-            return False
+        return _is_loopback(self.host)
 
     def host_allowed(self) -> bool:
         """True when the target host appears in ``allowed_hosts``."""
@@ -291,17 +295,33 @@ class Config(BaseModel):
         ``allowed_hosts`` answers "did the operator mean to point at this
         host?", and ``--i-have-authorization`` answers "is the operator
         allowed to attack it?". A typo cannot satisfy both.
+
+        Both gates cover ``spec_path`` as well as ``base_url``. Fetching an API
+        description is still an outbound request to a host, and a config whose
+        ``spec_path`` points somewhere else would otherwise reach that host
+        before either rail was consulted.
         """
-        if not self.target.host_allowed():
+        self._check_host(self.target.host, self.target.base_url, i_have_authorization)
+
+        spec_path = self.target.spec_path
+        if spec_path and spec_path.startswith(("http://", "https://")):
+            spec_host = urlsplit(spec_path).hostname or ""
+            if spec_host != self.target.host:
+                self._check_host(spec_host, spec_path, i_have_authorization, what="spec_path")
+
+    def _check_host(
+        self, host: str, url: str, i_have_authorization: bool, *, what: str = "target"
+    ) -> None:
+        if host not in set(self.target.allowed_hosts):
             msg = (
-                f"target host {self.target.host!r} is not in [target] allowed_hosts "
+                f"{what} host {host!r} is not in [target] allowed_hosts "
                 f"{list(self.target.allowed_hosts)}. Add it deliberately — this list "
-                "is what stops a copy-pasted config from probing the wrong system."
+                "is what stops a copy-pasted config from reaching the wrong system."
             )
             raise ConfigError(msg)
-        if not self.target.is_loopback and not i_have_authorization:
+        if not _is_loopback(host) and not i_have_authorization:
             msg = (
-                f"{self.target.base_url} is not a loopback address. Re-run with "
+                f"{url} is not a loopback address. Re-run with "
                 "--i-have-authorization to state that you are authorised to test it. "
                 "That flag is a statement you are making, not a permission this tool grants."
             )
