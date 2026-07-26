@@ -1,0 +1,115 @@
+"""Find leaks that live in the cache rather than in the query.
+
+A cache key that omits the tenant defeats a perfectly correct query. The
+application filters by tenant, gets the right answer, and then stores it under
+``invoice:{id}`` — so whichever tenant asks first populates the entry and the
+next tenant is served it.
+
+This is the failure mode that is hardest to catch any other way. Code review
+sees a correct ``WHERE`` clause. A single-tenant test suite passes. The leak
+depends on request ordering and cache lifetime, so it reproduces
+intermittently, in production, under load.
+
+The attack is a three-step sequence and the order is the whole point:
+
+1. **Cold read as the actor.** If the object comes back now, the endpoint has
+   no tenant check at all — that is an IDOR, it belongs to that module, and
+   this one stays quiet rather than reporting the same bug twice.
+2. **Warm as the victim.** The victim reads its own object, legitimately,
+   populating whatever cache sits behind the endpoint.
+3. **Read again as the actor.** Data that was correctly refused in step 1 and
+   arrives in step 3 came from the cache, not the database.
+
+No cache is inspected and no Redis connection is needed: the evidence is
+entirely in the observable behaviour, which means this works against any cache
+implementation, including one inside the process.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+
+from tenanttrace.core.models import AttackName, ProbeResult, Verdict
+from tenanttrace.probe.attacks.base import AttackContext, build_path, candidate_ids
+from tenanttrace.probe.oracle import AccessMode
+
+__all__ = ["CacheAttack"]
+
+
+class CacheAttack:
+    """Cold read, victim warms the cache, read again."""
+
+    name = AttackName.CACHE
+
+    def run(self, ctx: AttackContext) -> Iterator[ProbeResult]:
+        for endpoint in ctx.inventory.objects():
+            if ctx.is_allowlisted(endpoint):
+                continue
+
+            ids = candidate_ids(endpoint, ctx.victim_ctx, exclude=ctx.excluded_ids)
+            if not ids:
+                continue
+            identifier = ids[0]
+            path = build_path(endpoint, identifier)
+
+            # Step 1 — cold. A leak here is an IDOR, not a cache bug.
+            cold = ctx.actor.request(endpoint.method, path, attack=self.name.value)
+            cold_decision = ctx.oracle.judge(
+                cold.facts(), mode=AccessMode.OBJECT, sent_ids=[identifier]
+            )
+            if cold_decision.leaked:
+                continue
+
+            # Step 2 — the victim reads its own object. This is an ordinary,
+            # authorised request; it is the application that turns it into a
+            # shared cache entry.
+            warm = ctx.victim.request(endpoint.method, path, attack=self.name.value)
+            if not warm.ok:
+                # Nothing was cached, so step 3 could not distinguish a cache
+                # leak from an ordinary refusal.
+                continue
+
+            # Step 3 — the same request that was refused in step 1.
+            hot = ctx.actor.request(endpoint.method, path, attack=self.name.value)
+            hot_decision = ctx.oracle.judge(
+                hot.facts(), mode=AccessMode.OBJECT, sent_ids=[identifier]
+            )
+
+            if not hot_decision.leaked:
+                yield ProbeResult(
+                    attack=self.name,
+                    endpoint=endpoint,
+                    actor=ctx.actor_ctx.label,
+                    target=ctx.victim_ctx.label,
+                    verdict=Verdict.ENFORCED,
+                    evidence=hot.evidence(),
+                    detail=(
+                        "isolation held after the other tenant warmed the same object — "
+                        "no shared cache entry observed"
+                    ),
+                )
+                continue
+
+            evidence = hot.evidence().model_copy(
+                update={
+                    "matched_canary": hot_decision.matched_canary,
+                    "matched_ids": hot_decision.matched_ids,
+                    "note": (
+                        f"identical request was refused with {cold.status} before tenant "
+                        f"{ctx.victim_ctx.label} read the same object; served after"
+                    ),
+                }
+            )
+            yield ProbeResult(
+                attack=self.name,
+                endpoint=endpoint,
+                actor=ctx.actor_ctx.label,
+                target=ctx.victim_ctx.label,
+                verdict=Verdict.LEAKED,
+                evidence=evidence,
+                detail=(
+                    f"{hot_decision.reason} — the same request returned "
+                    f"{cold.status} on a cold cache, so the response came from a cache "
+                    "entry keyed without the tenant"
+                ),
+            )
