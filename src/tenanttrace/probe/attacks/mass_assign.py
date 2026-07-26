@@ -75,7 +75,13 @@ class MassAssignAttack:
             # A response that does not echo the owner proves nothing on its
             # own, so confirm by reading the record back as the victim: if the
             # victim can see it, it landed in the victim's tenant.
-            if decision.verdict is not Verdict.LEAKED and created_id:
+            #
+            # Only INCONCLUSIVE is escalated. An ENFORCED verdict here is a
+            # positive statement — the application told us the record stayed
+            # with its creator — and overriding that on a follow-up read
+            # reported a confirmed critical cross-tenant write against an
+            # application that had behaved correctly.
+            if decision.verdict is Verdict.INCONCLUSIVE and created_id:
                 confirmed = self._confirm_via_victim(ctx, endpoint, created_id)
                 if confirmed is not None:
                     decision = confirmed
@@ -134,7 +140,16 @@ class MassAssignAttack:
         exchange = ctx.victim.request(HttpMethod.GET, path, attack=self.name.value)
         if not exchange.ok:
             return None
-        from tenanttrace.probe.oracle import OracleDecision
+
+        from tenanttrace.probe.oracle import OracleDecision, iter_json_scalars
+
+        # A 2xx is not enough. The route may ignore the id, return a
+        # collection, or answer with an unrelated object — all of which would
+        # make "the victim can read it" true of a request that never reached
+        # the record we created. The response has to actually present that id.
+        body = exchange.facts().json_body
+        if body is None or created_id not in set(iter_json_scalars(body)):
+            return None
 
         return OracleDecision(
             verdict=Verdict.LEAKED,

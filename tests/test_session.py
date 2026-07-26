@@ -90,8 +90,22 @@ def test_ordinary_headers_survive_redaction() -> None:
     assert redact_headers({"Accept": "application/json"}) == {"Accept": "application/json"}
 
 
-def test_redaction_can_be_disabled_explicitly() -> None:
-    assert redact_headers({"Authorization": "x"}, redact=False) == {"Authorization": "x"}
+def test_redaction_cannot_be_disabled() -> None:
+    """`--full-evidence` widens what we keep of the target, never of our tokens.
+
+    It reached the run artifact before this was fixed, and CI uploads that
+    artifact.
+    """
+    assert redact_headers({"Authorization": "x"}, redact=False) == {"Authorization": "<redacted>"}
+
+
+@pytest.mark.parametrize(
+    "header",
+    ["X-Session-Token", "Api-Secret", "X-Auth", "Refresh-Token", "X-Vault-Credential"],
+)
+def test_credential_like_headers_are_redacted_even_when_unlisted(header: str) -> None:
+    """A fixed list of names is a denylist, and the next app names it differently."""
+    assert redact_headers({header: "s3cret"})[header] == "<redacted>"
 
 
 def test_exchange_never_carries_a_live_token(config) -> None:  # type: ignore[no-untyped-def]

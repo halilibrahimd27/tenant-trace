@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import enum
 import json
+import re
 import secrets
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -44,11 +45,14 @@ __all__ = [
     "AccessMode",
     "CANARY_RE",
     "MAX_SCAN_BYTES",
+    "MIN_TRUSTWORTHY_ID_LENGTH",
     "OracleDecision",
     "ResponseFacts",
     "TenantOracle",
+    "iter_json_scalars",
     "iter_json_strings",
     "make_canary",
+    "scan_for_identifiers",
     "scan_for_markers",
 ]
 
@@ -148,6 +152,107 @@ def iter_json_strings(node: Any, *, depth: int = 0, max_depth: int = 64) -> Iter
             yield from iter_json_strings(item, depth=depth + 1, max_depth=max_depth)
 
 
+# An identifier shorter than this cannot be judged from a response body.
+#
+# The reason is arithmetic, not taste. With auto-increment primary keys — the
+# default in Rails, Django, and Laravel — the victim's ids are "4", "5", "6",
+# and those digits appear inside the actor's OWN data: in `"amount": 104`, in a
+# timestamp, in a tenant slug, in the hex of the actor's own canary. Searching
+# for them found a "leak" in 200 out of 200 correctly-isolated responses.
+#
+# So short ids are collected as corroboration and never as proof. A real leak
+# in such an application is still caught by the canary, which is what the
+# oracle leads with anyway (ADR-0003).
+MIN_TRUSTWORTHY_ID_LENGTH = 8
+
+# Numbers need far more digits than that, because a number shares a namespace
+# with every other number in a response body.
+MIN_TRUSTWORTHY_NUMERIC_ID_LENGTH = 12
+
+
+def iter_json_scalars(node: Any, *, depth: int = 0, max_depth: int = 64) -> Iterator[str]:
+    """Yield every scalar in a decoded document, rendered as a string.
+
+    Keys are included: some APIs key a collection by id
+    (``{"018f-…": {...}}``), and a leak through those is still a leak.
+    Booleans are skipped — ``True`` is an ``int`` in Python, and no identifier
+    is a boolean.
+    """
+    if depth > max_depth:
+        return
+    if isinstance(node, Mapping):
+        for key, value in node.items():
+            if isinstance(key, str):
+                yield key
+            yield from iter_json_scalars(value, depth=depth + 1, max_depth=max_depth)
+    elif isinstance(node, (list, tuple)):
+        for item in node:
+            yield from iter_json_scalars(item, depth=depth + 1, max_depth=max_depth)
+    elif isinstance(node, bool):
+        return
+    elif isinstance(node, (str, int, float)):
+        yield str(node)
+
+
+def _bounded_in_text(needle: str, haystack: str) -> bool:
+    """True when ``needle`` appears in ``haystack`` delimited by non-id characters.
+
+    Used only for bodies we could not parse. ``"4" in text`` is meaningless;
+    ``018f4c1e-…`` bounded by quotes or whitespace is not.
+    """
+    for match in re.finditer(re.escape(needle), haystack):
+        before = haystack[match.start() - 1] if match.start() else ""
+        after = haystack[match.end()] if match.end() < len(haystack) else ""
+        if not (before.isalnum() or before in "-_") and not (after.isalnum() or after in "-_"):
+            return True
+    return False
+
+
+def is_judgeable_identifier(identifier: str) -> bool:
+    """Whether an id carries enough entropy to be evidence on its own.
+
+    Two thresholds, because two things collide differently. A UUID or a hash
+    is unique enough that seeing it anywhere is meaningful. A *number* shares a
+    namespace with every other number in the document — amounts, counts,
+    timestamps, page sizes — so it needs to be long before it means anything,
+    and a freshly-seeded auto-increment id never will be.
+    """
+    if not identifier:
+        return False
+    if identifier.isdigit():
+        return len(identifier) >= MIN_TRUSTWORTHY_NUMERIC_ID_LENGTH
+    return len(identifier) >= MIN_TRUSTWORTHY_ID_LENGTH
+
+
+def scan_for_identifiers(facts: ResponseFacts, identifiers: Iterable[str]) -> tuple[str, ...]:
+    """Victim identifiers present in the response, matched exactly.
+
+    Deliberately stricter than :func:`scan_for_markers`. A canary is a long
+    unique string we minted, so a substring hit is conclusive. An id is
+    somebody else's value in somebody else's format, so it is matched by exact
+    equality against the document's scalars — or, for a body we could not
+    parse, as a boundary-delimited token. ``"4" in text`` is not evidence of
+    anything.
+    """
+    wanted = [i for i in identifiers if is_judgeable_identifier(i)]
+    if not wanted:
+        return ()
+
+    scalars = set(iter_json_scalars(facts.json_body)) if facts.json_body is not None else set()
+
+    found: list[str] = []
+    for identifier in wanted:
+        if identifier in scalars:
+            found.append(identifier)
+        elif not identifier.isdigit() and _bounded_in_text(identifier, facts.text):
+            # A long non-numeric id embedded in prose — {"note": "see 018f…"} —
+            # is still a leak, and at this length it cannot collide with
+            # anything. Numeric ids get no text search at all: digits embed in
+            # every amount and timestamp in the document.
+            found.append(identifier)
+    return tuple(sorted(found))
+
+
 def scan_for_markers(facts: ResponseFacts, markers: Iterable[str]) -> tuple[str, ...]:
     """Return the markers present in a response, in the order given.
 
@@ -203,18 +308,30 @@ class TenantOracle:
         return tuple(sorted(canaries))
 
     def leaked_ids(self, facts: ResponseFacts, *, sent_ids: Iterable[str] = ()) -> tuple[str, ...]:
-        """Victim record ids present in the response, minus the ones we sent.
+        """Victim record ids the response presents as identifiers, minus ours.
 
-        This exclusion is the whole reason ids are secondary evidence. An IDOR
-        attempt puts the victim's id in the request URL, and plenty of
-        well-behaved applications echo the id back:
-        ``{"detail": "Invoice 018f-… not found"}``. Counting that as a leak
-        would report a false critical against an application that did exactly
-        the right thing.
+        Two exclusions, both load-bearing.
+
+        **Ids we sent** are dropped, because an IDOR attempt puts the victim's
+        id in the request URL and plenty of well-behaved applications echo it
+        back: ``{"detail": "Invoice 018f-… not found"}``. Counting that would
+        report a critical against an application that did the right thing.
+
+        **Ids too short to be evidence** are dropped by
+        :func:`scan_for_identifiers` — see :data:`MIN_TRUSTWORTHY_ID_LENGTH`.
         """
         echoed = {str(i) for i in sent_ids}
-        candidates = [i for i in self._victim_ids if i not in echoed]
-        return scan_for_markers(facts, candidates)
+        candidates = [i for i in sorted(self._victim_ids) if i not in echoed]
+        return scan_for_identifiers(facts, candidates)
+
+    def unjudgeable_ids(self) -> tuple[str, ...]:
+        """Victim ids too short or too numeric to be used as evidence.
+
+        Surfaced rather than silently discarded: an operator whose application
+        uses integer primary keys should know that this run leaned entirely on
+        canaries, instead of assuming id coverage they did not get.
+        """
+        return tuple(sorted(i for i in self._victim_ids if not is_judgeable_identifier(i)))
 
     # ------------------------------------------------------------------ #
     # Verdicts
@@ -462,19 +579,38 @@ def _walk_values(node: Any, key: str, *, depth: int = 0) -> Iterator[Any]:
             yield from _walk_values(item, key, depth=depth + 1)
 
 
-def _extract_number(body: Any, key: str) -> int | None:
-    """First numeric value stored under ``key``, or None.
+def _as_count(value: Any) -> int | None:
+    """Coerce a JSON value to a row count, or None if it is not one.
 
     Booleans are rejected: in Python ``True`` is an ``int``, and an aggregate
     field that is actually a flag must not be compared against a row count.
     """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return None
+
+
+def _extract_number(body: Any, key: str) -> int | None:
+    """The numeric value stored under ``key``, preferring the top level.
+
+    Top level first, and it matters: the caller picked this field by reading
+    the top-level object, so a nested field that happens to share the name —
+    ``{"invoice_count": 3, "archived": {"invoice_count": 900}}`` — must not
+    shadow the number that was actually chosen. Walking the whole document and
+    taking the first hit compared the wrong figure against the seeded count.
+    """
+    if isinstance(body, Mapping) and key in body:
+        top = _as_count(body[key])
+        if top is not None:
+            return top
     for value in _walk_values(body, key):
-        if isinstance(value, bool):
-            continue
-        if isinstance(value, int):
-            return value
-        if isinstance(value, float) and value.is_integer():
-            return int(value)
+        count = _as_count(value)
+        if count is not None:
+            return count
     return None
 
 

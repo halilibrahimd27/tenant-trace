@@ -35,6 +35,7 @@ from tenanttrace.core.models import (
     Severity,
     Verdict,
 )
+from tenanttrace.core.redaction import redact_headers as _redact_headers
 
 __all__ = [
     "SCHEMA_VERSION",
@@ -51,10 +52,6 @@ SCHEMA_VERSION = 1
 
 # Long enough to prove a leak, short enough that a report stays readable.
 SNIPPET_LIMIT = 500
-REDACTED = "<redacted>"
-SENSITIVE_HEADERS = frozenset(
-    {"authorization", "cookie", "set-cookie", "x-api-key", "x-auth-token", "proxy-authorization"}
-)
 
 
 # --------------------------------------------------------------------------- #
@@ -93,10 +90,7 @@ def _strip_credentials(headers: Mapping[str, str]) -> dict[str, str]:
     reason anybody would want that, and one accidental `--full-evidence` in CI
     would put a live credential in a build log.
     """
-    return {
-        name: (REDACTED if name.lower() in SENSITIVE_HEADERS else value)
-        for name, value in headers.items()
-    }
+    return _redact_headers(headers)
 
 
 def redact_evidence(evidence: Evidence, *, redact: bool = True) -> Evidence:

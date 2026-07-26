@@ -173,13 +173,110 @@ def test_echoed_request_id_is_not_evidence(oracle: TenantOracle) -> None:
     assert decision.verdict is Verdict.ENFORCED
 
 
-def test_unsent_victim_id_is_a_leak(oracle: TenantOracle) -> None:
-    body = json.dumps({"items": [{"id": "b-2"}]})
+def test_unsent_victim_id_is_a_leak() -> None:
+    sent = "018f4c1e-3a9b-7c2d-9e5f-1a2b3c4d5e60"
+    other = "018f4c1e-3a9b-7c2d-9e5f-1a2b3c4d5e6f"
+    oracle = TenantOracle(
+        actor=make_tenant(TenantLabel.A),
+        victim=make_tenant(TenantLabel.B, record_ids=(sent, other)),
+    )
+    body = json.dumps({"items": [{"id": other}]})
     decision = oracle.judge(
-        facts_from_parts(status=200, text=body), mode=AccessMode.COLLECTION, sent_ids=["b-1"]
+        facts_from_parts(status=200, text=body), mode=AccessMode.COLLECTION, sent_ids=[sent]
     )
     assert decision.verdict is Verdict.LEAKED
-    assert decision.matched_ids == ("b-2",)
+    assert decision.matched_ids == (other,)
+
+
+# --------------------------------------------------------------------------- #
+# Identifier evidence has to be worth something
+# --------------------------------------------------------------------------- #
+
+
+def test_short_numeric_ids_are_never_evidence() -> None:
+    """The false positive that would fire on every Rails/Django/Laravel app.
+
+    With auto-increment keys the victim owns ids 4, 5, 6 — and those digits
+    appear inside the actor's *own* data: in an amount, a timestamp, a tenant
+    slug, the hex of the actor's own canary. Substring-matching them reported a
+    confirmed critical leak on a perfectly isolated response.
+    """
+    actor = make_tenant(
+        TenantLabel.A,
+        canary="tt-canary-A-3b65b29ee79c6dde",
+        tenant_id="tenant-5be423aa",
+        record_ids=("1", "2", "3"),
+    )
+    victim = make_tenant(TenantLabel.B, tenant_id="tenant-2", record_ids=("4", "5", "6"))
+    oracle = TenantOracle(actor=actor, victim=victim)
+
+    isolated = json.dumps(
+        [
+            {
+                "id": 1,
+                "title": f"{actor.canary} thing 0",
+                "amount": 100,
+                "tenant_id": actor.tenant_id,
+            },
+            {"id": 2, "amount": 104, "tenant_id": actor.tenant_id},
+        ]
+    )
+    decision = oracle.judge(facts_from_parts(status=200, text=isolated), mode=AccessMode.COLLECTION)
+    assert decision.verdict is Verdict.ENFORCED
+    assert decision.matched_ids == ()
+
+
+def test_unjudgeable_ids_are_reported_not_silently_dropped() -> None:
+    """An operator with integer keys should know the run leaned on canaries."""
+    oracle = TenantOracle(
+        actor=make_tenant(TenantLabel.A),
+        victim=make_tenant(TenantLabel.B, record_ids=("4", "5", "6")),
+    )
+    assert oracle.unjudgeable_ids() == ("4", "5", "6")
+
+
+def test_a_real_leak_in_an_integer_keyed_app_is_still_caught() -> None:
+    """Dropping weak id evidence must not cost a genuine finding."""
+    victim = make_tenant(TenantLabel.B, record_ids=("4", "5", "6"))
+    oracle = TenantOracle(actor=make_tenant(TenantLabel.A, record_ids=("1",)), victim=victim)
+    body = json.dumps([{"id": 4, "title": f"{victim.canary} thing 0"}])
+    assert oracle.judge(facts_from_parts(status=200, text=body), mode=AccessMode.COLLECTION).leaked
+
+
+def test_a_uuid_is_evidence_wherever_it_appears() -> None:
+    identifier = "018f4c1e-3a9b-7c2d-9e5f-1a2b3c4d5e6f"
+    oracle = TenantOracle(
+        actor=make_tenant(TenantLabel.A),
+        victim=make_tenant(TenantLabel.B, record_ids=(identifier,)),
+    )
+    for body in (
+        json.dumps([{"id": identifier}]),
+        json.dumps({"note": f"see {identifier} for details"}),
+        f"<html><td>{identifier}</td></html>",
+    ):
+        decision = oracle.judge(facts_from_parts(status=200, text=body), mode=AccessMode.COLLECTION)
+        assert decision.verdict is Verdict.LEAKED, body
+
+
+def test_an_id_that_only_appears_inside_a_longer_token_is_not_a_match() -> None:
+    """`3b65b29e` sits inside the actor's own canary hex; that is not a leak."""
+    actor = make_tenant(TenantLabel.A, canary="tt-canary-A-3b65b29ee79c6dde")
+    oracle = TenantOracle(actor=actor, victim=make_tenant(TenantLabel.B, record_ids=("3b65b29e",)))
+    body = json.dumps([{"title": actor.canary}])
+    assert oracle.judge(
+        facts_from_parts(status=200, text=body), mode=AccessMode.COLLECTION
+    ).verdict is (Verdict.ENFORCED)
+
+
+def test_matched_ids_are_deterministic() -> None:
+    """Sets iterate arbitrarily; a report should not reorder between runs."""
+    ids = tuple(f"018f4c1e-3a9b-7c2d-9e5f-1a2b3c4d5e{n:02d}" for n in range(5))
+    oracle = TenantOracle(
+        actor=make_tenant(TenantLabel.A),
+        victim=make_tenant(TenantLabel.B, record_ids=ids),
+    )
+    facts = facts_from_parts(status=200, text=json.dumps([{"id": i} for i in ids]))
+    assert oracle.leaked_ids(facts) == tuple(sorted(ids))
 
 
 @pytest.mark.parametrize("status", [401, 403, 404])

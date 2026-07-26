@@ -30,32 +30,36 @@ import httpx
 
 from tenanttrace.core.config import Config
 from tenanttrace.core.models import Evidence, HttpMethod, TenantLabel
+from tenanttrace.core.redaction import REDACTED, SENSITIVE_HEADERS, is_sensitive_header
+from tenanttrace.core.redaction import redact_headers as _redact
 from tenanttrace.probe.oracle import ResponseFacts, facts_from_parts
 
-__all__ = ["Exchange", "RateLimiter", "TenantSession", "build_client", "redact_headers"]
-
-# Header values that must never reach an artifact, a log line, or a PR comment
-# in readable form. Matched case-insensitively against the header name.
-SENSITIVE_HEADERS = frozenset(
-    {"authorization", "cookie", "set-cookie", "x-api-key", "x-auth-token", "proxy-authorization"}
-)
-
-REDACTED = "<redacted>"
+__all__ = [
+    "REDACTED",
+    "SENSITIVE_HEADERS",
+    "Exchange",
+    "RateLimiter",
+    "TenantSession",
+    "build_client",
+    "is_sensitive_header",
+    "redact_headers",
+]
 
 
 def redact_headers(headers: Mapping[str, str], *, redact: bool = True) -> dict[str, str]:
-    """Copy headers with credentials removed.
+    """Copy headers with credentials removed. Not optional.
 
     Redaction happens at the boundary where the exchange is created, not at
     render time, so there is no code path in which a token is written to disk
     and only hidden later.
+
+    ``redact`` is accepted for symmetry with the renderers and deliberately
+    does **not** re-enable credentials. ``--full-evidence`` widens what is kept
+    of the *target's* responses; it is not a switch for writing our own bearer
+    tokens into a file that CI uploads as an artifact.
     """
-    if not redact:
-        return dict(headers)
-    return {
-        name: (REDACTED if name.lower() in SENSITIVE_HEADERS else value)
-        for name, value in headers.items()
-    }
+    del redact  # credentials are never recorded, in any mode
+    return _redact(headers)
 
 
 @dataclass(frozen=True, slots=True)

@@ -195,8 +195,8 @@ def run_probe(config: Config, options: ProbeOptions | None = None) -> ProbeOutco
         attack_names = tuple(name for name in _ATTACK_ORDER if name in enabled)
         attacks = build_attacks(attack_names)
 
-        for actor_label, victim_label in _DIRECTIONS:
-            ctx = AttackContext(
+        contexts = {
+            actor_label: AttackContext(
                 config=config,
                 inventory=inventory,
                 actor=sessions[actor_label],
@@ -207,9 +207,19 @@ def run_probe(config: Config, options: ProbeOptions | None = None) -> ProbeOutco
                 allow_mutation=opts.allow_mutation and config.probe.allow_mutation,
                 excluded_ids=frozenset(control_ids),
             )
-            for attack in attacks:
+            for actor_label, victim_label in _DIRECTIONS
+        }
+
+        # Attack outermost, direction innermost. Nesting it the other way
+        # defeats the ordering guarantee: the first direction's mass-assignment
+        # would run before the second direction's aggregate check, so a row
+        # this run created could be counted as a row the application leaked.
+        # Every read-only attack now finishes, in both directions, before
+        # anything writes.
+        for attack in attacks:
+            for actor_label, _ in _DIRECTIONS:
                 try:
-                    for result in attack.run(ctx):
+                    for result in attack.run(contexts[actor_label]):
                         state.results.append(result)
                         state.endpoints_tested.add(result.endpoint.key)
                 except Exception as exc:  # noqa: BLE001 - one attack must not end the run
