@@ -30,6 +30,7 @@ from tenanttrace import __version__
 from tenanttrace._importing import ensure_cwd_importable
 from tenanttrace.core.config import Config, ConfigError, TargetConfig, load_config
 from tenanttrace.core.models import Confidence, Finding, RunReport, RunStatus, Severity
+from tenanttrace.core.text import count
 
 app = typer.Typer(
     name="tenanttrace",
@@ -110,7 +111,7 @@ def _print_findings(findings: list[Finding], *, title: str) -> None:
     table.add_column("severity", no_wrap=True)
     table.add_column("confidence", no_wrap=True)
     table.add_column("category", no_wrap=True)
-    table.add_column("location")
+    table.add_column("location", overflow="fold")
     for finding in findings:
         colour = {
             Severity.CRITICAL: "bold red",
@@ -128,6 +129,37 @@ def _print_findings(findings: list[Finding], *, title: str) -> None:
             finding.location,
         )
     console.print(table)
+
+
+def _print_verdict(report: RunReport) -> None:
+    """The outcome in one line, in the same words the HTML report uses.
+
+    A table of findings answers "what", not "so what". This is the line that
+    gets pasted into a chat window, so it has to hold up on its own — in
+    particular it must never let "we refused everything" and "we tested
+    nothing" print the same way.
+    """
+    if report.status is not RunStatus.VALID:
+        return  # the INVALID banner already said it, louder.
+
+    confirmed = len(report.confirmed)
+    if confirmed:
+        console.print(
+            f"[bold red]✗ {count(confirmed, 'confirmed cross-tenant leak')}[/] — another "
+            "tenant's data was returned. Each finding carries the request that proved it."
+        )
+        return
+    if not report.results:
+        err.print(
+            "[bold yellow]! Nothing was tested[/] — no cross-tenant attempt was made, so "
+            "this run is not evidence of isolation."
+        )
+        return
+    console.print(
+        f"[green]✓ No cross-tenant access proven[/] — {count(len(report.results), 'attempt')} "
+        f"refused across {count(report.endpoints_tested, 'endpoint')}. "
+        "Covers what was probed, not the whole application."
+    )
 
 
 def _print_status(report: RunReport) -> None:
@@ -186,7 +218,7 @@ def _correlate_with_static(report: RunReport, config: Config, scan_path: Path | 
 
     merged = correlate(list(report.findings), list(result.findings))
     console.print(
-        f"  static: {result.files_scanned} file(s), scoping {result.scoping.mode.value}, "
+        f"  static: {count(result.files_scanned, 'file')}, scoping {result.scoping.mode.value}, "
         f"{len(result.findings)} hypothes(es), {len(merged.links)} correlated"
     )
     return report.model_copy(
@@ -298,7 +330,7 @@ def probe(
         raise typer.Exit(EXIT_USAGE) from exc
 
     if dry_run:
-        console.print(f"[bold]dry run[/] — {len(outcome.plan)} attempt(s) would be made:\n")
+        console.print(f"[bold]dry run[/] — {count(len(outcome.plan), 'attempt')} would be made:\n")
         for line in outcome.plan:
             console.print(f"  {line}")
         raise typer.Exit(EXIT_OK)
@@ -309,6 +341,7 @@ def probe(
 
     _print_status(report)
     _print_findings(list(report.ranked()), title="Findings")
+    _print_verdict(report)
     if outcome.artifact_dir:
         console.print(f"  artifacts → {outcome.artifact_dir}")
     if not no_report:
@@ -344,7 +377,7 @@ def scan(
 
     result = scan_path(path, config)
     console.print(
-        f"scanned {result.files_scanned} file(s); scoping mode detected: "
+        f"scanned {count(result.files_scanned, 'file')}; scoping mode detected: "
         f"[bold]{result.scoping.mode.value}[/]"
     )
     for reason in result.scoping.reasons[:5]:
@@ -462,7 +495,8 @@ def summary(
     order = ["critical", "high", "medium", "low", "info"]
     histogram = " · ".join(f"**{counts[s]}** {s}" for s in order if counts.get(s))
 
-    lines.append(f"{len(confirmed)} confirmed finding(s)" + (f": {histogram}" if histogram else ""))
+    headline = count(len(confirmed), "confirmed finding")
+    lines.append(headline + (f": {histogram}" if histogram else ""))
     lines.append(
         f"Coverage: {stored.endpoints_tested} of {stored.endpoints_discovered} known "
         f"endpoints, {len(stored.results)} cross-tenant attempts."
@@ -510,7 +544,11 @@ def metrics(
         raise typer.Exit(EXIT_USAGE)
 
     report_ = score_targets(labels, min_recall=min_recall)
-    console.print(report_.render())
+    # markup=False: this block is plain text that legitimately contains square
+    # brackets — "[probe] exclude_paths", "[confirmed] GET /x". Rich would read
+    # those as style tags and silently delete them, so the one line explaining
+    # why an endpoint was skipped would lose the name of the setting to change.
+    console.print(report_.render(), markup=False, highlight=False)
     raise typer.Exit(EXIT_OK if report_.passed else EXIT_FINDINGS)
 
 
@@ -572,6 +610,7 @@ def demo(
 
         _print_status(outcome.report)
         _print_findings(list(outcome.report.ranked()), title=f"{name}_app findings")
+        _print_verdict(outcome.report)
 
         target_file = out_dir / f"{name}_app.{ 'md' if fmt == 'md' else fmt }"
         target_file.write_text(render(outcome.report, fmt), encoding="utf-8")

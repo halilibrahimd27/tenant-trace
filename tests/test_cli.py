@@ -298,3 +298,27 @@ def test_dry_run_needs_no_seeding_and_sends_no_attacks(tmp_path: Path) -> None:
     result = runner.invoke(app, ["probe", "-c", str(path), "--dry-run"])
     # The spec cannot be fetched, so the run is INVALID rather than a crash.
     assert result.exit_code in {EXIT_INVALID, EXIT_FINDINGS, EXIT_OK}
+
+
+# --------------------------------------------------------------------------- #
+# The one-line verdict — what gets pasted into a chat window
+# --------------------------------------------------------------------------- #
+
+
+def test_the_demo_says_plainly_which_app_leaks(tmp_path: Path) -> None:
+    result = runner.invoke(app, ["demo", "--out", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "confirmed cross-tenant leak" in result.output
+    assert "No cross-tenant access proven" in result.output
+
+
+def test_metrics_keeps_the_bracketed_setting_name(tmp_path: Path) -> None:
+    """Rich reads [probe] as a style tag and deletes it — so markup is off.
+
+    The note exists to tell an operator which setting skipped an endpoint.
+    Losing the setting's name to a markup parser leaves a sentence that says
+    something was skipped by nothing in particular.
+    """
+    result = runner.invoke(app, ["metrics", "--labels", "fixtures/labels.yaml"])
+    assert result.exit_code == EXIT_OK, result.output
+    assert "[probe] exclude_paths" in result.output
