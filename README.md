@@ -123,6 +123,8 @@ Then point at it:
 [target]
 base_url      = "http://127.0.0.1:8000"
 allowed_hosts = ["127.0.0.1", "localhost"]
+spec          = "openapi"        # or "har" / "postman" / "routes"
+spec_path     = "http://127.0.0.1:8000/openapi.json"
 
 [seeder]
 adapter = "seeders.my_app:MySeeder"
@@ -187,9 +189,10 @@ Being specific about this is part of the tool being trustworthy.
 - **Leaks with no HTTP surface.** A report generator writing the wrong tenant's
   rows to a file nobody fetches is invisible to probing. The static engine can
   flag the code path; it cannot prove the leak.
-- **Routes it never hears about.** Coverage comes from your OpenAPI document or
-  a hand-written route list. Undocumented endpoints go untested, and the report
-  says how many endpoints it knew about.
+- **Routes it never hears about.** Coverage comes from an OpenAPI document, a
+  HAR capture, a Postman collection, or a hand-written route list. Undocumented
+  endpoints go untested, and the report says how many endpoints it knew about
+  so a thin inventory cannot pass for a clean result.
 - **Sums.** The aggregate oracle judges `*_count` fields against seeded row
   counts. It does **not** judge `*_total`, because that is usually money and
   comparing it to a row count would report a critical against correct code.

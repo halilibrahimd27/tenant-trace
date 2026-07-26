@@ -4,9 +4,30 @@ Coverage is bounded by this module: an endpoint nobody told us about does not
 get probed, and the report says so rather than implying the surface was
 complete.
 
-Loaders are kept behind a small protocol so HAR and Postman importers can be
-added later without touching the attacks — they consume ``Endpoint`` and have
-no idea where it came from.
+Four formats, because "we could not test it" is a worse answer than "you
+exported a HAR":
+
+``openapi``
+    The best case. Path templates, parameters, and request schemas are all
+    declared, so nothing has to be inferred.
+``har``
+    A browser or proxy capture. This is how you audit an application whose API
+    is real but undocumented — click through it once, save the HAR, point
+    TenantTrace at it.
+``postman``
+    A collection export, which most teams with an undocumented API already
+    have lying around.
+``routes``
+    A hand-written list, for when there is nothing else.
+
+The last three describe *concrete requests*, not templates, so identifiers have
+to be inferred back out of the URLs — see :func:`templatize`. Getting that
+wrong costs coverage, never correctness: a path that fails to templatise is
+probed as a literal, and the oracle judges the response the same way either
+way.
+
+Loaders sit behind a small protocol and produce ``Endpoint`` values; the
+attacks have no idea where an endpoint came from.
 """
 
 from __future__ import annotations
@@ -30,8 +51,11 @@ __all__ = [
     "SpecError",
     "SpecLoader",
     "load_inventory",
+    "parse_har",
     "parse_openapi",
+    "parse_postman",
     "parse_routes",
+    "templatize",
 ]
 
 _PATH_PARAM_RE = re.compile(r"\{([^{}/]+)\}")
@@ -308,6 +332,303 @@ def parse_routes(document: Any, *, source: str = "") -> EndpointInventory:
 
 
 # --------------------------------------------------------------------------- #
+# Recorded traffic: HAR and Postman
+# --------------------------------------------------------------------------- #
+
+# Segments that look like an identifier rather than a resource name. Kept
+# deliberately conservative: mistaking a resource name for an id merges two
+# distinct endpoints into one and silently loses coverage, which is worse than
+# probing the same endpoint twice.
+_ID_SEGMENT_RE = re.compile(
+    r"""^(
+        \d+                                                   # 42
+      | [0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}  # uuid
+      | [0-7][0-9A-HJKMNP-TV-Z]{25}                           # ulid
+      | [0-9a-fA-F]{16,}                                      # long hex
+      | [A-Za-z0-9_-]{20,}                                    # opaque token-ish
+    )$""",
+    re.VERBOSE,
+)
+
+# Things a browser capture is full of and an API audit should never touch.
+_STATIC_SUFFIXES = (
+    ".js",
+    ".mjs",
+    ".css",
+    ".map",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".svg",
+    ".webp",
+    ".ico",
+    ".woff",
+    ".woff2",
+    ".ttf",
+    ".eot",
+    ".mp4",
+    ".webm",
+)
+
+
+def templatize(path: str) -> tuple[str, tuple[str, ...]]:
+    """Infer a path template from a concrete URL path.
+
+    ``/api/invoices/018f4c1e-…/lines/7`` becomes
+    ``/api/invoices/{id}/lines/{id2}`` with parameters ``("id", "id2")``.
+
+    Assumption, and how it can be wrong: a path segment that looks like an
+    identifier is one. A resource genuinely named ``/api/2024`` would be
+    templatised into ``/api/{id}`` and merged with its siblings. The cost is
+    coverage, not a wrong verdict — and the alternative, treating every id as a
+    distinct endpoint, turns a hundred-request capture into a hundred
+    "endpoints" and buries the report.
+    """
+    params: list[str] = []
+    out: list[str] = []
+    for segment in path.split("/"):
+        existing = _PATH_PARAM_RE.fullmatch(segment)
+        if existing:
+            # Already templated — Postman's :param, or a hand-written route.
+            # A name the author chose beats one we would have guessed.
+            params.append(existing.group(1))
+            out.append(segment)
+        elif segment and _ID_SEGMENT_RE.match(segment):
+            name = "id" if not params else f"id{len(params) + 1}"
+            params.append(name)
+            out.append("{" + name + "}")
+        else:
+            out.append(segment)
+    return "/".join(out) or "/", tuple(params)
+
+
+def _is_probe_worthy(path: str) -> bool:
+    """Filter out the static assets a browser capture is mostly made of."""
+    lowered = path.lower()
+    return not lowered.endswith(_STATIC_SUFFIXES)
+
+
+@dataclass
+class _Accumulator:
+    """Merges repeated observations of one endpoint into a single Endpoint.
+
+    A capture usually contains the same request many times, sometimes with
+    different query parameters. Every observation contributes what it saw.
+    """
+
+    method: HttpMethod
+    path: str
+    path_params: tuple[str, ...]
+    query: dict[str, None]
+    body: dict[str, None]
+
+    def observe(self, query: Sequence[str], body: Sequence[str]) -> None:
+        for name in query:
+            self.query.setdefault(name, None)
+        for name in body:
+            self.body.setdefault(name, None)
+
+    def build(self) -> Endpoint:
+        return Endpoint(
+            method=self.method,
+            path=self.path,
+            path_params=self.path_params,
+            query_params=tuple(self.query),
+            body_fields=tuple(self.body),
+        )
+
+
+def _body_field_names(text: str | None, mime: str) -> tuple[str, ...]:
+    """Top-level field names of a recorded request body."""
+    if not text:
+        return ()
+    if "json" in mime.lower():
+        try:
+            decoded = json.loads(text)
+        except ValueError:
+            return ()
+        return tuple(str(k) for k in decoded) if isinstance(decoded, Mapping) else ()
+    if "form" in mime.lower():
+        from urllib.parse import parse_qsl
+
+        return tuple(dict.fromkeys(k for k, _ in parse_qsl(text)))
+    return ()
+
+
+def _collect(
+    observations: Iterator[tuple[str, str, Sequence[str], Sequence[str]]],
+    *,
+    host_filter: str | None,
+    source: str,
+) -> EndpointInventory:
+    """Fold concrete observations into a deduplicated inventory."""
+    from urllib.parse import parse_qsl, urlsplit
+
+    endpoints: dict[tuple[HttpMethod, str], _Accumulator] = {}
+    warnings: list[str] = []
+    skipped_host = 0
+    skipped_static = 0
+
+    for raw_method, raw_url, extra_query, body_fields in observations:
+        method_name = raw_method.upper()
+        if method_name not in HttpMethod.__members__:
+            continue
+
+        parts = urlsplit(raw_url)
+        # A capture contains third-party traffic — CDNs, analytics, fonts.
+        # Probing those would send adversarial requests to somebody else's
+        # servers, so anything off-target is dropped rather than tested.
+        if host_filter and parts.hostname and parts.hostname != host_filter:
+            skipped_host += 1
+            continue
+
+        path = parts.path or "/"
+        if not _is_probe_worthy(path):
+            skipped_static += 1
+            continue
+
+        template, params = templatize(path)
+        query_names = [k for k, _ in parse_qsl(parts.query)] + list(extra_query)
+
+        key = (HttpMethod(method_name), template)
+        accumulator = endpoints.get(key)
+        if accumulator is None:
+            accumulator = _Accumulator(
+                method=key[0], path=template, path_params=params, query={}, body={}
+            )
+            endpoints[key] = accumulator
+        accumulator.observe(query_names, body_fields)
+
+    if skipped_host:
+        warnings.append(
+            f"{skipped_host} request(s) to other hosts were ignored — a capture is not "
+            "permission to probe third parties"
+        )
+    if skipped_static:
+        warnings.append(f"{skipped_static} static asset request(s) skipped")
+    if not endpoints:
+        warnings.append("no probe-worthy requests found in the capture")
+
+    built = sorted((a.build() for a in endpoints.values()), key=lambda e: (e.path, e.method.value))
+    return EndpointInventory(tuple(built), tuple(warnings), source)
+
+
+def parse_har(document: Any, *, source: str = "", host: str | None = None) -> EndpointInventory:
+    """Build an inventory from a HAR 1.2 capture.
+
+    ``host`` restricts the import to the target's own hostname. It is not
+    optional in practice: a browser HAR is mostly other people's servers.
+    """
+    if not isinstance(document, Mapping):
+        msg = "HAR file must be a JSON object"
+        raise SpecError(msg)
+    log = document.get("log")
+    entries = log.get("entries") if isinstance(log, Mapping) else None
+    if not isinstance(entries, Sequence):
+        msg = "HAR file has no log.entries array — is it really a HAR?"
+        raise SpecError(msg)
+
+    def observations() -> Iterator[tuple[str, str, Sequence[str], Sequence[str]]]:
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                continue
+            request = entry.get("request")
+            if not isinstance(request, Mapping):
+                continue
+            url = request.get("url")
+            method = request.get("method")
+            if not isinstance(url, str) or not isinstance(method, str):
+                continue
+            query = [
+                str(q.get("name"))
+                for q in request.get("queryString", []) or []
+                if isinstance(q, Mapping) and q.get("name")
+            ]
+            post = request.get("postData")
+            body: tuple[str, ...] = ()
+            if isinstance(post, Mapping):
+                body = _body_field_names(
+                    post.get("text") if isinstance(post.get("text"), str) else None,
+                    str(post.get("mimeType", "")),
+                )
+                params = post.get("params")
+                if not body and isinstance(params, Sequence):
+                    body = tuple(
+                        str(p.get("name"))
+                        for p in params
+                        if isinstance(p, Mapping) and p.get("name")
+                    )
+            yield method, url, query, body
+
+    return _collect(observations(), host_filter=host, source=source)
+
+
+def parse_postman(document: Any, *, source: str = "", host: str | None = None) -> EndpointInventory:
+    """Build an inventory from a Postman collection (schema v2.x).
+
+    Postman paths often already carry ``:param`` placeholders; those are
+    honoured rather than re-inferred, since a name the author chose beats one
+    we guessed.
+    """
+    if not isinstance(document, Mapping) or "item" not in document:
+        msg = "Postman collection must be a JSON object with an 'item' array"
+        raise SpecError(msg)
+
+    def walk(items: Any) -> Iterator[Mapping[str, Any]]:
+        if not isinstance(items, Sequence):
+            return
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            if "item" in item:  # a folder
+                yield from walk(item["item"])
+            elif isinstance(item.get("request"), Mapping):
+                yield item["request"]
+
+    def observations() -> Iterator[tuple[str, str, Sequence[str], Sequence[str]]]:
+        for request in walk(document.get("item")):
+            method = request.get("method")
+            if not isinstance(method, str):
+                continue
+            url = request.get("url")
+            raw = url.get("raw") if isinstance(url, Mapping) else url
+            if not isinstance(raw, str):
+                continue
+            query: list[str] = []
+            if isinstance(url, Mapping):
+                query = [
+                    str(q.get("key"))
+                    for q in url.get("query", []) or []
+                    if isinstance(q, Mapping) and q.get("key")
+                ]
+            body_spec = request.get("body")
+            body: tuple[str, ...] = ()
+            if isinstance(body_spec, Mapping):
+                mode = str(body_spec.get("mode", ""))
+                if mode == "raw":
+                    body = _body_field_names(body_spec.get("raw"), "json")
+                elif mode in {"urlencoded", "formdata"}:
+                    entries = body_spec.get(mode, []) or []
+                    body = tuple(
+                        str(e.get("key"))
+                        for e in entries
+                        if isinstance(e, Mapping) and e.get("key")
+                    )
+            # {{baseUrl}}-style variables are not resolvable here and would
+            # otherwise become a path segment; strip them to a bare path.
+            cleaned = re.sub(r"\{\{[^}]*\}\}", "", raw)
+            cleaned = re.sub(r"^https?://[^/]*", "", cleaned)
+            if not cleaned.startswith("/"):
+                cleaned = "/" + cleaned.lstrip("/")
+            # Postman's :param becomes our {param}.
+            cleaned = re.sub(r"/:([A-Za-z_][A-Za-z0-9_]*)", r"/{\1}", cleaned)
+            yield method, cleaned, query, body
+
+    return _collect(observations(), host_filter=None, source=source)
+
+
+# --------------------------------------------------------------------------- #
 # Entry point
 # --------------------------------------------------------------------------- #
 
@@ -360,8 +681,19 @@ def load_inventory(config: Config, client: httpx.Client | None = None) -> Endpoi
             raise SpecError(msg)
 
     fetched = _fetch(spec_path, client)
-    parser = parse_openapi if config.target.spec == "openapi" else parse_routes
-    return parser(fetched.document, source=fetched.source).filtered(config)
+    kind = config.target.spec
+    if kind == "openapi":
+        inventory = parse_openapi(fetched.document, source=fetched.source)
+    elif kind == "har":
+        # Scoped to the target's own host: a browser capture is full of
+        # third-party traffic, and having a HAR is not permission to probe
+        # whoever else appears in it.
+        inventory = parse_har(fetched.document, source=fetched.source, host=config.target.host)
+    elif kind == "postman":
+        inventory = parse_postman(fetched.document, source=fetched.source)
+    else:
+        inventory = parse_routes(fetched.document, source=fetched.source)
+    return inventory.filtered(config)
 
 
 def substitute_path(path: str, values: Mapping[str, str], *, fallback: str | None = None) -> str:

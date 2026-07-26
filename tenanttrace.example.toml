@@ -11,7 +11,15 @@ base_url = "http://127.0.0.1:8000"
 # The prober refuses any host not listed here. Non-loopback hosts additionally
 # require the --i-have-authorization flag.
 allowed_hosts = ["127.0.0.1", "localhost"]
-spec = "openapi"                                   # openapi | routes
+# How TenantTrace learns which endpoints exist. Coverage is bounded by this:
+# an endpoint nobody mentions does not get probed, and the report says so.
+#   openapi  — best case; templates and schemas are declared
+#   har      — a browser/proxy capture, for an undocumented but real API.
+#              Only requests to base_url's own host are imported; a capture is
+#              not permission to probe the third parties in it.
+#   postman  — a collection export (schema v2.x)
+#   routes   — a hand-written list; see the `routes:` shape in probe/spec.py
+spec = "openapi"                                   # openapi | har | postman | routes
 spec_path = "http://127.0.0.1:8000/openapi.json"
 timeout_seconds = 10.0
 

@@ -52,7 +52,7 @@ class TargetConfig(_Section):
 
     base_url: str
     allowed_hosts: tuple[str, ...] = ("127.0.0.1", "localhost")
-    spec: Literal["openapi", "routes"] = "openapi"
+    spec: Literal["openapi", "har", "postman", "routes"] = "openapi"
     spec_path: str | None = None
     timeout_seconds: float = Field(default=10.0, gt=0, le=300)
 

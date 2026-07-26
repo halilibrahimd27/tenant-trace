@@ -306,9 +306,11 @@ no new confirmed findings at or above high                        exit 0</code><
       <li><strong>Leaks with no HTTP surface.</strong> If a report generator
       writes the wrong tenant's rows to a file nobody fetches, probing won't see
       it. The static engine flags the code path; it can't prove the leak.</li>
-      <li><strong>Routes it never hears about.</strong> Coverage comes from your
-      OpenAPI spec, HAR capture, or route list. Undocumented endpoints stay
-      untested.</li>
+      <li><strong>Routes it never hears about.</strong> Coverage comes from an
+      OpenAPI document, a HAR capture, a Postman collection, or a route list.
+      Undocumented endpoints stay untested — and the report says how many
+      endpoints it knew about, so a thin inventory can't pass for a clean
+      result.</li>
       <li><strong>Sums.</strong> The aggregate oracle checks
       <span class="mono">*_count</span> fields against the rows it seeded. It
       deliberately doesn't judge <span class="mono">*_total</span> — that's
