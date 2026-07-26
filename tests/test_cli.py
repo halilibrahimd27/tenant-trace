@@ -109,6 +109,17 @@ def test_the_scaffolded_seeder_implements_the_protocol(
         assert f"def {method}(" in source
 
 
+def test_the_scaffolded_config_keeps_its_documentation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The comments are most of the example's value to a first-time reader."""
+    monkeypatch.chdir(tmp_path)
+    runner.invoke(app, ["init"])
+    text = (tmp_path / "tenanttrace.toml").read_text(encoding="utf-8")
+    assert text.count("#") > 10
+    assert "allowed_hosts" in text
+
+
 def test_init_does_not_clobber_existing_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

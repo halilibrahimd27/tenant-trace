@@ -453,9 +453,7 @@ def init(
     Two files and nothing else. The seeder is the only code you have to write,
     and the stub marks the four methods that need filling in.
     """
-    from tenanttrace.core import config as config_module
-
-    template = Path(config_module.__file__).resolve().parents[3] / "tenanttrace.example.toml"
+    template = _example_config_path()
     module = str(seeder_path.with_suffix("")).replace("/", ".").replace("\\", ".")
     written: list[Path] = []
 
@@ -484,6 +482,16 @@ def init(
             f"[dim]The config's \\[seeder] adapter should read "
             f'"{module}:MySeeder".[/]'
         )
+
+
+def _example_config_path() -> Path:
+    """Locate the documented example config, installed or in a checkout."""
+    here = Path(__file__).resolve().parent
+    candidates = (
+        here / "data" / "tenanttrace.example.toml",  # installed wheel
+        here.parents[1] / "tenanttrace.example.toml",  # editable install / checkout
+    )
+    return next((c for c in candidates if c.is_file()), candidates[0])
 
 
 def _config_template(example: Path, seeder_module: str) -> str:

@@ -66,6 +66,13 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/tenanttrace"]
 
+# `tenanttrace init` scaffolds a config from the documented example. Without
+# this the installed package falls back to a minimal, comment-free config —
+# which parses, but throws away the explanations that are most of the file's
+# value to somebody configuring the tool for the first time.
+[tool.hatch.build.targets.wheel.force-include]
+"tenanttrace.example.toml" = "tenanttrace/data/tenanttrace.example.toml"
+
 [tool.hatch.build.targets.sdist]
 include = ["src/tenanttrace", "README.md", "LICENSE"]
 
