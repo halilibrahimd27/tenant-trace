@@ -1,0 +1,69 @@
+# TenantTrace configuration.
+#
+# Copy to `tenanttrace.toml` and fill in. That filename is gitignored on
+# purpose — it points at a real system and names your credential env vars.
+#
+# This file is the contract: `tenanttrace validate-config` parses it on every
+# CI run, so any key documented here is a key the loader accepts.
+
+[target]
+base_url = "http://127.0.0.1:8000"
+# The prober refuses any host not listed here. Non-loopback hosts additionally
+# require the --i-have-authorization flag.
+allowed_hosts = ["127.0.0.1", "localhost"]
+spec = "openapi"                                   # openapi | routes
+spec_path = "http://127.0.0.1:8000/openapi.json"
+timeout_seconds = 10.0
+
+[auth]
+# How the prober authenticates as each tenant.
+#
+# PRECEDENCE (ADR-0006): if a seeder is configured and it returns auth headers
+# for a tenant, those win — the seeder created the tenant, so it holds the only
+# credentials that can exist. This section is the fallback for targets whose
+# tenants you cannot create through the API.
+strategy = "bearer"                                # bearer | cookie | header | custom
+tenant_a = { token_env = "TT_TOKEN_A" }
+tenant_b = { token_env = "TT_TOKEN_B" }
+# strategy = "header" also takes a header name:
+#   header_name = "X-Api-Key"
+# strategy = "custom" points at a callable returning headers for a tenant:
+#   resolver = "seeders.my_app:auth_headers"
+
+[seeder]
+# The per-application integration point — roughly 30 lines you write once.
+# See seeders/example_seeder.py. Omit it only if [auth] supplies credentials
+# for two tenants whose data you have already seeded by hand.
+adapter = "seeders.example_seeder:ExampleSeeder"
+
+[tenancy]
+column = "tenant_id"                               # also tried: company_id, org_id
+scoping_mode = "auto"                              # auto | manual | global
+scoped_models = ["Invoice", "Customer", "Document"]
+# Endpoints that are SUPPOSED to cross tenants (platform admin, health checks).
+# Anything matching is exempt from cross-tenant findings. Supports * globs.
+cross_tenant_allowlist = ["/api/admin/*"]
+
+[probe]
+allow_mutation = false                             # mass-assignment attacks need this
+max_rps = 10.0
+exclude_paths = ["/health", "/metrics", "/auth/logout"]
+attacks = ["idor", "listing", "aggregate", "param_override", "cache"]
+# Add "mass_assign" above AND pass --allow-mutation to enable cross-tenant writes.
+
+[static]
+path = "src/"
+adapter = "python_sqlalchemy"                      # auto | python_sqlalchemy
+# Where the tenant enters the request. Adjust to your app's vocabulary.
+tenant_sources = ["get_current_tenant", "get_tenant_id", "request.state.tenant_id"]
+jwt_claim = "tenant_id"
+exclude_globs = ["**/migrations/**", "**/tests/**"]
+
+[report]
+fail_on = "high"                                   # critical | high | medium | low | none
+formats = ["json", "md"]
+baseline = ".tenanttrace-baseline.json"
+out_dir = ".tenanttrace"
+# Run artifacts hold real leaked data. By default response bodies are truncated
+# and credentials are redacted; --full-evidence keeps them verbatim.
+redact_evidence = true
