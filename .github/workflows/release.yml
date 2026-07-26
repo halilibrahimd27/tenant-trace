@@ -5,24 +5,61 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: write        # create the GitHub Release
   id-token: write        # PyPI trusted publishing — no API token needed
   packages: write        # GHCR
 
 jobs:
-  pypi:
+  # Nothing is published before the gate passes and the tag is checked against
+  # the version in pyproject.toml. A release that disagrees with its own
+  # metadata is the kind of thing you only notice after it is immutable.
+  check:
     runs-on: ubuntu-latest
-    environment: release
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - run: uv python install 3.12
+      - run: uv sync --extra dev --extra fixtures
+
+      - name: Tag must match the packaged version
+        id: version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg=$(uv run python -c "import tenanttrace; print(tenanttrace.__version__)")
+          echo "version=$pkg" >> "$GITHUB_OUTPUT"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match __version__ $pkg"
+            exit 1
+          fi
+
+      - name: The gate
+        run: make verify
+
+  pypi:
+    needs: check
+    runs-on: ubuntu-latest
+    # Opt-in, because PyPI trusted publishing has to be configured on the PyPI
+    # side first (project → Publishing → add a GitHub publisher). Until that
+    # exists this job would fail every release for a reason that has nothing to
+    # do with the code, so it stays off until somebody sets the variable.
+    if: vars.PUBLISH_TO_PYPI == 'true'
+    environment: pypi
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
       - run: uv build
       - uses: pypa/gh-action-pypi-publish@release/v1
 
-  docker:
+  ghcr:
+    needs: check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -32,9 +69,70 @@ jobs:
         id: meta
         with:
           images: ghcr.io/${{ github.repository }}
-      - uses: docker/build-push-action@v6
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      - name: Build and push the CLI image
+        uses: docker/build-push-action@v6
         with:
           context: .
+          # `target` is not optional here. Without it Docker builds the LAST
+          # stage in the Dockerfile, which is `demo` — the image carrying the
+          # deliberately vulnerable fixture applications. Publishing that as
+          # the tool's official image would ship exploitable code to everyone
+          # who pulls it.
+          target: runtime
           push: true
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+      - name: The published image must not contain the fixtures
+        run: |
+          image="ghcr.io/${{ github.repository }}:${{ needs.check.outputs.version }}"
+          docker pull "$image"
+          docker run --rm "$image" version
+          test "$(docker run --rm --entrypoint id "$image" -u)" != "0"
+          if docker run --rm --entrypoint sh "$image" -c 'ls /app/fixtures' 2>/dev/null; then
+            echo "::error::the published image contains the vulnerable fixtures"
+            exit 1
+          fi
+
+  release:
+    needs: [check, ghcr]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          cat > /tmp/notes.md <<EOF
+          See [CHANGELOG.md](https://github.com/${REPO}/blob/main/CHANGELOG.md).
+
+          Try it without installing anything:
+
+              git clone https://github.com/${REPO}
+              cd $(basename "${REPO}")
+              docker compose up -d      # reports at http://127.0.0.1:8088
+
+          Container image:
+
+              docker pull ghcr.io/${REPO}:${VERSION}
+          EOF
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file /tmp/notes.md \
+            --verify-tag
+
+      # The composite action is consumed as `uses: owner/repo@v1`, so a moving
+      # major tag has to exist and follow each release.
+      - name: Move the major tag
+        run: |
+          major="$(echo "${GITHUB_REF_NAME}" | cut -d. -f1)"   # v0.1.0 -> v0
+          git tag -f "$major" "${GITHUB_REF_NAME}"
+          git push -f origin "$major"

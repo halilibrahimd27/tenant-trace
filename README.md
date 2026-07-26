@@ -162,7 +162,7 @@ def test_tenants_are_isolated():
 ## In CI
 
 ```yaml
-- uses: halilibrahimd27/tenant-trace@v1
+- uses: halilibrahimd27/tenant-trace@v0
   with:
     config: tenanttrace.toml
     fail-on: high

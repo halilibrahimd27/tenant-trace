@@ -23,7 +23,7 @@ jobs:
           # your app must be reachable at the base_url in tenanttrace.toml
 
       - name: Audit tenant isolation
-        uses: halilibrahimd27/tenant-trace@v1
+        uses: halilibrahimd27/tenant-trace@v0
         with:
           config: tenanttrace.toml
           fail-on: high              # critical | high | medium | low
