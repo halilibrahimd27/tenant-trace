@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from tenanttrace.core.models import (
+    ATTACK_CATEGORIES,
     CANARY_RE,
     Confidence,
     ControlResult,
@@ -36,6 +37,8 @@ from tenanttrace.core.models import (
     Verdict,
 )
 from tenanttrace.core.redaction import redact_headers as _redact_headers
+from tenanttrace.core.severity import severity_for
+from tenanttrace.core.text import count as _count
 
 __all__ = [
     "SCHEMA_VERSION",
@@ -382,7 +385,7 @@ def _markdown_coverage(report: RunReport) -> list[str]:
     for result in enforced:
         by_attack[result.attack.value] = by_attack.get(result.attack.value, 0) + 1
     out += [
-        f"{len(enforced)} cross-tenant attempt(s) were correctly refused:",
+        f"{_count(len(enforced), 'cross-tenant attempt')} were correctly refused:",
         "",
         "| attack | refused |",
         "| --- | ---: |",
@@ -393,7 +396,7 @@ def _markdown_coverage(report: RunReport) -> list[str]:
     if inconclusive:
         out += [
             "",
-            f"{len(inconclusive)} attempt(s) were **inconclusive** — the oracle could not "
+            f"{_count(len(inconclusive), 'attempt')} were **inconclusive** — the oracle could not "
             "decide, which is not the same as enforcement:",
             "",
         ]
@@ -421,84 +424,193 @@ def _wrap(text: str, width: int = 76) -> list[str]:
 # --------------------------------------------------------------------------- #
 
 _CSS = """
+/* Neutrals are biased toward the accent rather than inherited grey, and the
+   severity ramp is deliberately separate from the accent so "critical" never
+   competes with chrome for attention. Both themes are defined at the token
+   level: the media query carries the OS preference, and the viewer's toggle
+   stamps data-theme on the root, which has to win in both directions. */
 :root {
   color-scheme: light dark;
-  --bg: #ffffff; --fg: #16181d; --muted: #5f6673; --line: #e3e6ea;
-  --card: #ffffff; --code: #f5f6f8;
-  --critical: #b3261e; --high: #c2410c; --medium: #a16207;
-  --low: #0e7490; --info: #64748b; --ok: #15803d;
+  --bg:#F6F7F9; --card:#FFFFFF; --ink:#151A21; --muted:#5C6673; --line:#E2E6EB;
+  --accent:#3E5C76; --code:#F0F2F5;
+  --critical:#B3261E; --high:#B45309; --medium:#8A6D0B; --low:#0E7490;
+  --info:#64748B; --ok:#15803D;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #0f1115; --fg: #e6e8ec; --muted: #9aa1ad; --line: #262a33;
-    --card: #161920; --code: #1c2027;
-    --critical: #ff6b5e; --high: #fb923c; --medium: #fbbf24;
-    --low: #38bdf8; --info: #94a3b8; --ok: #4ade80;
+    --bg:#0F1319; --card:#161B23; --ink:#E4E8ED; --muted:#8D97A5; --line:#242B35;
+    --accent:#7FA3C4; --code:#1B212A;
+    --critical:#FF6B5E; --high:#FB923C; --medium:#FBBF24; --low:#38BDF8;
+    --info:#94A3B8; --ok:#4ADE80;
   }
 }
-* { box-sizing: border-box; }
-body {
-  margin: 0; background: var(--bg); color: var(--fg);
-  font: 15px/1.65 ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
+:root[data-theme="dark"] {
+  --bg:#0F1319; --card:#161B23; --ink:#E4E8ED; --muted:#8D97A5; --line:#242B35;
+  --accent:#7FA3C4; --code:#1B212A;
+  --critical:#FF6B5E; --high:#FB923C; --medium:#FBBF24; --low:#38BDF8;
+  --info:#94A3B8; --ok:#4ADE80;
 }
-.wrap { max-width: 60rem; margin: 0 auto; padding: 3rem 1.5rem 6rem; }
-h1 { font-size: 1.75rem; margin: 0 0 .35rem; letter-spacing: -.02em; }
-h2 { font-size: 1.1rem; margin: 2.75rem 0 .9rem; letter-spacing: -.01em; }
-h3 { font-size: 1rem; margin: 0 0 .5rem; }
-p.meta { color: var(--muted); margin: 0 0 2rem; font-size: .9rem; }
-code, pre { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace; }
-code { background: var(--code); padding: .1rem .35rem; border-radius: .3rem; font-size: .875em; }
-pre {
-  background: var(--code); padding: .9rem 1rem; border-radius: .5rem;
-  overflow-x: auto; font-size: .8rem; line-height: 1.5; margin: .6rem 0;
+:root[data-theme="light"] {
+  --bg:#F6F7F9; --card:#FFFFFF; --ink:#151A21; --muted:#5C6673; --line:#E2E6EB;
+  --accent:#3E5C76; --code:#F0F2F5;
+  --critical:#B3261E; --high:#B45309; --medium:#8A6D0B; --low:#0E7490;
+  --info:#64748B; --ok:#15803D;
 }
-pre code { background: none; padding: 0; font-size: inherit; }
-table { border-collapse: collapse; width: 100%; font-size: .9rem; }
-th, td { text-align: left; padding: .45rem .7rem; border-bottom: 1px solid var(--line); }
-th { color: var(--muted); font-weight: 600; font-size: .78rem;
-     text-transform: uppercase; letter-spacing: .04em; }
-td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
-.scroll { overflow-x: auto; }
-.invalid {
-  border: 1px solid var(--critical); border-left-width: 4px; border-radius: .6rem;
-  padding: 1.1rem 1.3rem; margin: 0 0 2rem;
-  background: color-mix(in srgb, var(--critical) 8%, transparent);
+
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--ink);
+       font:15px/1.6 ui-sans-serif,-apple-system,"Segoe UI",Roboto,sans-serif;
+       -webkit-font-smoothing:antialiased; }
+/* Block flow, not a flex column. Every section here is emitted as a separate
+   top-level element, so a flex `gap` would apply between all of them *and*
+   add to each one's own margin — the two spacing systems fight and the rhythm
+   comes out uneven. In block flow adjacent margins collapse, so one rule per
+   element decides the space above it and nothing doubles. */
+.wrap { max-width:62rem; margin:0 auto; padding:3.5rem 1.5rem 6rem; }
+code, pre, .mono { font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace; }
+code { background:var(--code); padding:.1rem .34rem; border-radius:.25rem; font-size:.875em; }
+pre { background:var(--code); border-radius:.45rem; padding:.75rem .9rem; overflow-x:auto;
+      font-size:.77rem; line-height:1.5; margin:.5rem 0 0; }
+pre code { background:none; padding:0; font-size:inherit; }
+.scroll { overflow-x:auto; margin:0 0 1rem; }
+
+h1 { font-size:clamp(1.55rem,3.2vw,2rem); line-height:1.15; margin:0 0 .4rem;
+     letter-spacing:-.02em; text-wrap:balance; }
+/* Section labels, not headlines — the content under them carries the weight. */
+h2 { font-size:.78rem; font-weight:680; letter-spacing:.12em; text-transform:uppercase;
+     color:var(--muted); margin:3rem 0 1rem; }
+h3 { font-size:.94rem; font-weight:640; margin:1.75rem 0 .55rem; line-height:1.35;
+     letter-spacing:-.005em; text-wrap:balance; }
+.card h3 { font-size:1rem; margin:0 0 .4rem; }
+p.meta { color:var(--muted); font-size:.85rem; margin:0 0 1.1rem; max-width:74ch; }
+.card p.meta { margin:0; max-width:none; }
+/* The run line is a single fact; wrapping it reads as two. */
+p.meta.run { max-width:none; margin:0 0 1.5rem; }
+.eyebrow { font-size:.7rem; font-weight:650; letter-spacing:.14em; text-transform:uppercase;
+           color:var(--accent); margin:0 0 .5rem; }
+
+table { border-collapse:collapse; width:100%; font-size:.88rem; }
+table.matrix { max-width:42rem; }
+th,td { text-align:left; padding:.45rem .7rem; border-bottom:1px solid var(--line); }
+th { color:var(--muted); font-weight:640; font-size:.68rem; text-transform:uppercase;
+     letter-spacing:.09em; }
+td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+
+/* The verdict block. Three states, and the colour is doing real work: it has
+   to be readable as good/bad before a word of it is read. */
+.verdict { display:flex; flex-direction:column; gap:.3rem; padding:1rem 1.15rem;
+           border:1px solid var(--line); border-left:3px solid var(--info);
+           border-radius:.55rem; background:var(--card); margin:0 0 .5rem; }
+.verdict strong { font-size:1.15rem; font-weight:660; letter-spacing:-.015em; }
+.verdict span { color:var(--muted); font-size:.87rem; max-width:74ch; }
+.verdict.good { border-left-color:var(--ok); }
+.verdict.good strong { color:var(--ok); }
+.verdict.bad { border-left-color:var(--critical);
+               background:color-mix(in srgb,var(--critical) 7%,var(--card)); }
+.verdict.bad strong { color:var(--critical); }
+.verdict.warn { border-left-color:var(--medium); }
+.verdict.warn strong { color:var(--medium); }
+
+table.index td { vertical-align:middle; }
+table.index a { color:var(--accent); font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+                font-size:.84rem; }
+details.glossary { margin-top:2.25rem; }
+details.glossary dl.kv { margin-top:.7rem; }
+details.glossary dd { color:var(--muted); max-width:62ch; }
+.invalid { border:1px solid var(--critical); border-left-width:3px; border-radius:.55rem;
+           padding:1.1rem 1.3rem; margin:0 0 1.5rem;
+           background:color-mix(in srgb,var(--critical) 8%,transparent); }
+.invalid h2 { margin:0 0 .5rem; color:var(--critical); font-size:1rem;
+              letter-spacing:-.01em; text-transform:none; }
+.invalid p { margin:0 0 .5rem; }
+
+.tiles { display:grid; gap:.75rem; margin:0 0 1.5rem;
+         grid-template-columns:repeat(auto-fit,minmax(9.5rem,1fr)); }
+.tile { background:var(--card); border:1px solid var(--line); border-radius:.6rem;
+        padding:.9rem 1rem; display:flex; flex-direction:column; gap:.15rem; }
+.tile .n { font-size:1.7rem; font-weight:640; letter-spacing:-.03em; line-height:1.1;
+           font-variant-numeric:tabular-nums; }
+.tile .n.crit { color:var(--critical); }
+.tile .k { font-size:.67rem; font-weight:640; letter-spacing:.1em; text-transform:uppercase;
+           color:var(--muted); }
+.tile .sub { font-size:.76rem; color:var(--muted); }
+
+.card { border:1px solid var(--line); border-left:3px solid var(--info); border-radius:.6rem;
+        padding:1.1rem 1.25rem; margin:0 0 .9rem; background:var(--card);
+        display:flex; flex-direction:column; gap:.7rem; }
+.card.critical { border-left-color:var(--critical); }
+.card.high     { border-left-color:var(--high); }
+.card.medium   { border-left-color:var(--medium); }
+.card.low      { border-left-color:var(--low); }
+.badges { display:flex; flex-wrap:wrap; gap:.35rem; align-items:center; }
+.badge { font-size:.66rem; font-weight:660; letter-spacing:.07em; text-transform:uppercase;
+         padding:.16rem .45rem; border-radius:.25rem; border:1px solid var(--line);
+         color:var(--muted); white-space:nowrap; }
+.badge.sev-critical { color:var(--critical); border-color:var(--critical); }
+.badge.sev-high     { color:var(--high); border-color:var(--high); }
+.badge.sev-medium   { color:var(--medium); border-color:var(--medium); }
+.badge.sev-low      { color:var(--low); border-color:var(--low); }
+.badge.confirmed    { color:var(--critical); border-color:var(--critical); }
+.badge.suspected    { color:var(--medium); border-color:var(--medium); }
+
+dl.kv { display:grid; grid-template-columns:minmax(6.5rem,max-content) 1fr;
+        gap:.35rem .9rem; margin:0; font-size:.86rem; }
+dl.kv dt { font-size:.65rem; font-weight:660; letter-spacing:.09em; text-transform:uppercase;
+           color:var(--muted); padding-top:.16rem; }
+dl.kv dd { margin:0; overflow-wrap:anywhere; }
+
+details { margin:.35rem 0 0; }
+summary { cursor:pointer; color:var(--muted); font-size:.79rem; }
+summary:focus-visible { outline:2px solid var(--accent); outline-offset:2px; border-radius:.2rem; }
+
+/* Access graph. Edges are proven results; nothing speculative is drawn. */
+svg.graph { display:block; width:100%; height:auto; min-width:34rem; }
+svg.graph .edge { fill:none; stroke-width:1.3; opacity:.6; }
+svg.graph .edge.sev-critical { stroke:var(--critical); stroke-width:2; opacity:.85; }
+svg.graph .edge.sev-high     { stroke:var(--high); stroke-width:1.5; opacity:.75; }
+svg.graph .edge.sev-medium   { stroke:var(--medium); }
+svg.graph .edge.sev-low      { stroke:var(--low); }
+svg.graph .node rect { fill:var(--card); stroke:var(--accent); stroke-width:1.2; }
+svg.graph .node text { fill:var(--ink); font-size:12px;
+                       font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+svg.graph .node.actor text { font-family:inherit; font-weight:620; font-size:12px; }
+svg.graph .node.target circle { fill:var(--info); }
+svg.graph .node.target.sev-critical circle { fill:var(--critical); }
+svg.graph .node.target.sev-high circle     { fill:var(--high); }
+svg.graph .node.target.sev-medium circle   { fill:var(--medium); }
+
+.controls { list-style:none; padding:0; margin:0 0 1.25rem; display:flex;
+            flex-direction:column; gap:.4rem; font-size:.88rem; }
+/* Green marks the status, not the sentence — a whole line of colour reads as
+   an alarm. A *failing* control is the one case worth shouting about, because
+   it means the run proves nothing. */
+.legend { display:flex; flex-wrap:wrap; gap:1rem; margin:0 0 1rem;
+          font-size:.72rem; color:var(--muted); letter-spacing:.04em; }
+.legend span { display:inline-flex; align-items:center; gap:.35rem; }
+.legend i { width:1.1rem; height:2px; border-radius:1px; background:currentColor; }
+.legend .sev-critical { color:var(--critical); }
+.legend .sev-high { color:var(--high); }
+.legend .sev-medium { color:var(--medium); }
+.legend .sev-low { color:var(--low); }
+.controls li { color:var(--muted); }
+.controls strong { color:var(--ink); font-weight:620; }
+.controls .mark { font-weight:700; display:inline-block; width:1.05rem; }
+.controls .pass .mark { color:var(--ok); }
+.controls .fail, .controls .fail strong, .controls .fail .mark { color:var(--critical); }
+.empty { color:var(--muted); font-style:italic; }
+/* Block flow: a flex column would promote the inline <code> in this
+   sentence to a full-width row and break the sentence into three. */
+footer { margin-top:3.5rem; padding-top:1.1rem; border-top:1px solid var(--line);
+         color:var(--muted); font-size:.79rem; line-height:1.65; max-width:78ch; }
+@media (prefers-reduced-motion: reduce) {
+  * { animation:none !important; transition:none !important; }
 }
-.invalid h2 { margin: 0 0 .5rem; color: var(--critical); font-size: 1.05rem; }
-.invalid p { margin: 0 0 .5rem; }
-.card {
-  border: 1px solid var(--line); border-radius: .7rem; padding: 1.2rem 1.4rem;
-  margin: 0 0 1.1rem; background: var(--card); border-left: 4px solid var(--info);
-}
-.card.critical { border-left-color: var(--critical); }
-.card.high     { border-left-color: var(--high); }
-.card.medium   { border-left-color: var(--medium); }
-.card.low      { border-left-color: var(--low); }
-.badges { display: flex; flex-wrap: wrap; gap: .4rem; margin: 0 0 .9rem; }
-.badge {
-  font-size: .7rem; font-weight: 650; text-transform: uppercase; letter-spacing: .05em;
-  padding: .18rem .5rem; border-radius: .3rem; border: 1px solid var(--line);
-  color: var(--muted); white-space: nowrap;
-}
-.badge.sev-critical { color: var(--critical); border-color: var(--critical); }
-.badge.sev-high     { color: var(--high); border-color: var(--high); }
-.badge.sev-medium   { color: var(--medium); border-color: var(--medium); }
-.badge.sev-low      { color: var(--low); border-color: var(--low); }
-.badge.confirmed    { color: var(--critical); border-color: var(--critical); }
-.badge.suspected    { color: var(--medium); border-color: var(--medium); }
-dl.kv { display: grid; grid-template-columns: minmax(7rem, max-content) 1fr;
-        gap: .3rem .9rem; margin: 0 0 .9rem; font-size: .88rem; }
-dl.kv dt { color: var(--muted); }
-dl.kv dd { margin: 0; overflow-wrap: anywhere; }
-details { margin: .6rem 0; }
-summary { cursor: pointer; color: var(--muted); font-size: .85rem; }
-.controls li { list-style: none; }
-.controls { padding: 0; margin: 0 0 1rem; }
-.pass { color: var(--ok); } .fail { color: var(--critical); }
-.empty { color: var(--muted); font-style: italic; }
-footer { margin-top: 4rem; padding-top: 1.2rem; border-top: 1px solid var(--line);
-         color: var(--muted); font-size: .8rem; }
 """
+
+
+def _took(report: RunReport) -> str:
+    seconds = _duration_seconds(report)
+    return f" · took {seconds:.1f}s" if seconds is not None else ""
 
 
 def _e(value: object) -> str:
@@ -523,8 +635,9 @@ def render_html(report: RunReport, *, redact: bool = True) -> str:
         f"<style>{_CSS}</style>",
         "</head><body><div class='wrap'>",
         "<h1>TenantTrace — tenant isolation audit</h1>",
-        f"<p class='meta'>{_e(prepared.target)} · run <strong>{_e(status)}</strong> · "
-        f"tenanttrace {_e(prepared.tool_version)} · {_e(prepared.started_at.isoformat())}</p>",
+        f"<p class='meta run'>{_e(prepared.target)} · run <strong>{_e(status)}</strong> · "
+        f"tenanttrace {_e(prepared.tool_version)} · "
+        f"{_e(prepared.started_at.replace(microsecond=0).isoformat())}{_e(_took(prepared))}</p>",
     ]
 
     if prepared.status is not RunStatus.VALID:
@@ -537,16 +650,32 @@ def render_html(report: RunReport, *, redact: bool = True) -> str:
             "</div>",
         ]
 
-    parts += _html_controls(prepared)
+    # Order matters more than content here. A reader opening this page has one
+    # question — "is my application leaking?" — and every section before the
+    # answer is a section that delays it. Method and coverage come after, where
+    # they belong: as the reason to believe the answer.
+    parts += _html_verdict(prepared)
     parts += _html_summary(prepared)
+    parts += _html_graph(prepared)
 
     parts.append("<h2>Findings</h2>")
     if not prepared.findings:
-        parts.append("<p class='empty'>No findings.</p>")
+        parts.append(
+            "<p class='empty'>None. Every cross-tenant attempt below was refused "
+            "by the application.</p>"
+        )
+    parts += _html_finding_index(prepared)
     for finding in prepared.ranked():
         parts.append(_html_card(finding))
 
+    parts.append("<h2>Run integrity</h2>")
+    parts.append(
+        "<p class='meta'>Why the answer above can be trusted: the checks that prove "
+        "the harness worked, and what the application refused.</p>"
+    )
+    parts += _html_controls(prepared)
     parts += _html_coverage(prepared)
+    parts += _html_glossary()
     parts += [
         "<footer>Confirmed findings are proven by seeded canaries, not inferred. "
         "Credentials are removed and canary values shortened, but response bodies "
@@ -558,14 +687,110 @@ def render_html(report: RunReport, *, redact: bool = True) -> str:
     return "\n".join(parts) + "\n"
 
 
+def _html_verdict(report: RunReport) -> list[str]:
+    """The answer, in one sentence, before anything that explains it.
+
+    Three outcomes, and the distinction between the last two is the whole
+    point of the tool: *proven clean* and *never actually tested* look
+    identical in a finding list and must never look identical here.
+    """
+    if report.status is not RunStatus.VALID:
+        return []  # the INVALID banner already said it, louder.
+
+    confirmed = len(report.confirmed)
+    attempts = len(report.results)
+    if confirmed:
+        tenants = len({r.actor for r in report.results if r.verdict is Verdict.LEAKED})
+        return [
+            "<div class='verdict bad'>",
+            f"<strong>{confirmed} confirmed cross-tenant leak"
+            f"{'' if confirmed == 1 else 's'}</strong>",
+            f"<span>Data belonging to another tenant was read or written back to "
+            f"{tenants} authenticated tenant{'' if tenants == 1 else 's'}. "
+            f"Each finding below carries the request that proved it.</span>",
+            "</div>",
+        ]
+    if not attempts:
+        return [
+            "<div class='verdict warn'>",
+            "<strong>Nothing was tested</strong>",
+            "<span>No cross-tenant attempt was made, so this run is not evidence "
+            "of isolation. Check the endpoint inventory and the seeded tenants.</span>",
+            "</div>",
+        ]
+    return [
+        "<div class='verdict good'>",
+        "<strong>No cross-tenant access proven</strong>",
+        f"<span>{attempts} attempts were made against "
+        f"{report.endpoints_tested} endpoint{'' if report.endpoints_tested == 1 else 's'} "
+        "with real credentials for a second tenant, and the application refused "
+        "them. This covers what was probed — not the whole application.</span>",
+        "</div>",
+    ]
+
+
+def _html_finding_index(report: RunReport) -> list[str]:
+    """A jump list, once there are more findings than fit on a screen."""
+    ranked = report.ranked()
+    if len(ranked) < 3:
+        return []
+    rows = [
+        f"<tr><td><a href='#{_e(f.id)}'>{_e(f.id)}</a></td>"
+        f"<td><span class='badge sev-{_e(f.severity.value)}'>{_e(f.severity.value)}</span></td>"
+        f"<td><span class='badge {_e(f.confidence.value)}'>{_e(f.confidence.value)}</span></td>"
+        f"<td><code>{_e(f.location)}</code></td></tr>"
+        for f in ranked
+    ]
+    return [
+        "<div class='scroll'><table class='index'><thead><tr><th>id</th><th>severity</th>"
+        "<th>confidence</th><th>where</th></tr></thead><tbody>",
+        *rows,
+        "</tbody></table></div>",
+    ]
+
+
+def _html_glossary() -> list[str]:
+    """Four terms the report leans on. Collapsed — help, not preamble."""
+    terms = [
+        (
+            "Confirmed",
+            "A canary planted in another tenant's data came back in this tenant's "
+            "response, or an exact count did not match. Proven, not inferred — "
+            "these are the only findings that fail CI by default.",
+        ),
+        (
+            "Suspected",
+            "A hypothesis from reading the source: a query that looks unscoped. "
+            "It has not been reproduced over HTTP and never gates a build on its own.",
+        ),
+        (
+            "Positive control",
+            "A tenant reading its own data. If that fails, the harness is broken and "
+            "an empty finding list means nothing — so the run is marked INVALID "
+            "rather than clean.",
+        ),
+        (
+            "Inconclusive",
+            "The attempt ran but the oracle could not decide — a truncated body, a "
+            "redirect. Deliberately not counted as enforcement.",
+        ),
+    ]
+    return [
+        "<details class='glossary'><summary>How to read this report</summary><dl class='kv'>",
+        *[f"<dt>{_e(term)}</dt><dd>{_e(body)}</dd>" for term, body in terms],
+        "</dl></details>",
+    ]
+
+
 def _html_controls(report: RunReport) -> list[str]:
-    parts = ["<h2>Positive controls</h2>", "<ul class='controls'>"]
+    parts = ["<h3>Positive controls</h3>", "<ul class='controls'>"]
     if not report.controls:
         parts.append("<li class='empty'>No controls were run.</li>")
     for control in report.controls:
-        css, mark = ("pass", "✅") if control.passed else ("fail", "❌")
+        css, mark = ("pass", "✓") if control.passed else ("fail", "✗")
         parts.append(
-            f"<li class='{css}'>{mark} <strong>{_e(control.name)}</strong> — "
+            f"<li class='{css}'><span class='mark'>{mark}</span>"
+            f"<strong>{_e(control.name)}</strong> — "
             f"{_e(control.detail)}</li>"
         )
     parts.append("</ul>")
@@ -585,22 +810,47 @@ def _html_summary(report: RunReport) -> list[str]:
             f"<td class='num'>{counts[Confidence.SUSPECTED]}</td>"
             f"<td class='num'>{counts[Confidence.INCONCLUSIVE]}</td></tr>"
         )
-    if not rows:
-        rows.append(
-            "<tr><td class='empty'>none</td><td class='num'>0</td>"
-            "<td class='num'>0</td><td class='num'>0</td></tr>"
-        )
-    return [
-        "<h2>Summary</h2>",
-        "<div class='scroll'><table><thead><tr><th>severity</th>"
-        "<th class='num'>confirmed</th><th class='num'>suspected</th>"
-        "<th class='num'>inconclusive</th></tr></thead><tbody>",
-        *rows,
-        "</tbody></table></div>",
-        f"<p class='meta'>{len(report.confirmed)} confirmed, {len(report.suspected)} suspected "
-        f"across {report.endpoints_tested} of {report.endpoints_discovered} known endpoints "
-        f"({len(report.results)} cross-tenant attempts).</p>",
+
+    confirmed, suspected = len(report.confirmed), len(report.suspected)
+    enforced = len(_enforced(report))
+    tiles = [
+        (
+            str(confirmed),
+            "confirmed",
+            "proven by seeded ground truth",
+            "crit" if confirmed else "",
+        ),
+        (str(suspected), "suspected", "hypotheses; never gate CI", ""),
+        (
+            f"{report.endpoints_tested}<span class='sub'>/{report.endpoints_discovered}</span>",
+            "endpoints",
+            "probed of those known",
+            "",
+        ),
+        (str(enforced), "refused", "attempts the app blocked", ""),
     ]
+
+    parts = ["<h2>Summary</h2>", "<div class='tiles'>"]
+    for value, key, sub, extra in tiles:
+        parts.append(
+            f"<div class='tile'><span class='n {extra}'>{value}</span>"
+            f"<span class='k'>{_e(key)}</span><span class='sub'>{_e(sub)}</span></div>"
+        )
+    parts.append("</div>")
+
+    if rows:
+        parts += [
+            "<div class='scroll'><table class='matrix'><thead><tr><th>severity</th>"
+            "<th class='num'>confirmed</th><th class='num'>suspected</th>"
+            "<th class='num'>inconclusive</th></tr></thead><tbody>",
+            *rows,
+            "</tbody></table></div>",
+        ]
+    parts.append(
+        f"<p class='meta'>{_count(len(report.results), 'cross-tenant attempt')} across "
+        f"{_count(report.endpoints_tested, 'endpoint')}.</p>"
+    )
+    return parts
 
 
 def _html_card(finding: Finding) -> str:
@@ -637,7 +887,7 @@ def _html_card(finding: Finding) -> str:
     ]
 
     body = [
-        f"<article class='card {_e(finding.severity.value)}'>",
+        f"<article class='card {_e(finding.severity.value)}' id='{_e(finding.id)}'>",
         f"<div class='badges'>{''.join(badges)}</div>",
         f"<h3>{_e(finding.id)} · {_e(finding.title)}</h3>",
         f"<p class='meta'><code>{_e(finding.location)}</code></p>",
@@ -705,9 +955,107 @@ def _markdown_ish_to_html(text: str) -> str:
     return "".join(parts)
 
 
+def _html_graph(report: RunReport) -> list[str]:
+    """An access graph: who reached what, drawn only from proven results.
+
+    The idea is BloodHound's — in Active Directory the vulnerability is rarely
+    one permission, it is the *path*, and seeing the paths is what makes a
+    sprawling system comprehensible. The same is true of a large API: "four of
+    these hundred endpoints are where the boundary breaks" is a sentence a
+    table cannot say.
+
+    Nothing here is new analysis. Every edge is a ``ProbeResult`` that already
+    exists: a ``LEAKED`` verdict is an edge, an ``ENFORCED`` one is a
+    non-edge. That keeps the picture as trustworthy as the findings — it cannot
+    show a path that was not actually walked.
+
+    Drawn as inline SVG because the report has to stay a single file with no
+    outbound requests, and a charting library would be both.
+    """
+    leaked = [r for r in report.results if r.verdict is Verdict.LEAKED]
+    if not leaked:
+        return []
+
+    # One edge per (actor, endpoint): the same endpoint proven twice in one
+    # direction is one path, not two. Where two attacks proved the same edge,
+    # the worse one names it — the picture should not under-report.
+    edges: dict[tuple[str, str], Severity] = {}
+    for result in leaked:
+        key = (result.actor.value, result.endpoint.key)
+        severity = severity_for(ATTACK_CATEGORIES[result.attack])
+        if key not in edges or severity.rank > edges[key].rank:
+            edges[key] = severity
+
+    actors = sorted({actor for actor, _ in edges})
+    targets = sorted({endpoint for _, endpoint in edges})
+
+    # A node inherits the worst path that reaches it, for the same reason.
+    node_severity = {
+        target: max((s for (_, t), s in edges.items() if t == target), key=lambda s: s.rank)
+        for target in targets
+    }
+
+    row_h, pad_y = 34, 26
+    height = max(len(targets), len(actors)) * row_h + pad_y * 2
+    left_x, right_x = 96, 400
+    label_x = right_x + 14
+    # Endpoint keys are set in a monospace face; ~7.1px per character at 13px
+    # is close enough to keep the longest one inside the canvas.
+    width = int(label_x + max(len(t) for t in targets) * 7.1 + 24)
+
+    def spread(items: list[str]) -> dict[str, float]:
+        return {
+            item: pad_y + (height - 2 * pad_y) * (i + 0.5) / len(items)
+            for i, item in enumerate(items)
+        }
+
+    actor_y, target_y = spread(actors), spread(targets)
+
+    parts: list[str] = [
+        "<h2>Access graph</h2>",
+        "<p class='meta'>Every line is a cross-tenant access this run proved. "
+        "Attempts the application refused are not drawn — they are counted below.</p>",
+        "<div class='scroll'>",
+        f"<svg class='graph' viewBox='0 0 {width} {height}' "
+        f"style='max-width:{width}px' role='img' "
+        f"aria-label='Proven cross-tenant access paths'>",
+    ]
+
+    for (actor, target), severity in edges.items():
+        y1, y2 = actor_y[actor], target_y[target]
+        mid = (left_x + right_x) / 2
+        parts.append(
+            f"<path class='edge sev-{_e(severity.value)}' "
+            f"d='M{left_x} {y1:.1f} C{mid} {y1:.1f} {mid} {y2:.1f} {right_x - 5} {y2:.1f}'>"
+            f"<title>tenant {_e(actor)} → {_e(target)} ({_e(severity.value)})</title></path>"
+        )
+
+    for actor, y in actor_y.items():
+        parts.append(
+            f"<g class='node actor'><rect x='24' y='{y - 12:.1f}' width='72' height='24' rx='6'/>"
+            f"<text x='60' y='{y + 4:.1f}' text-anchor='middle'>tenant {_e(actor)}</text></g>"
+        )
+
+    for target, y in target_y.items():
+        severity = node_severity[target]
+        parts.append(
+            f"<g class='node target sev-{_e(severity.value)}'>"
+            f"<circle cx='{right_x}' cy='{y:.1f}' r='4'/>"
+            f"<text x='{label_x}' y='{y + 4:.1f}'>{_e(target)}</text></g>"
+        )
+
+    parts += ["</svg>", "</div>"]
+    present = sorted(set(edges.values()), key=lambda sev: -sev.rank)
+    keys = "".join(
+        f"<span class='sev-{_e(sev.value)}'><i></i>{_e(sev.value)}</span>" for sev in present
+    )
+    parts.append(f"<div class='legend'>{keys}</div>")
+    return parts
+
+
 def _html_coverage(report: RunReport) -> list[str]:
     enforced = _enforced(report)
-    parts = ["<h2>What was checked and held</h2>"]
+    parts = ["<h3>What was checked and held</h3>"]
     if not enforced:
         parts.append(
             "<p class='empty'>No cross-tenant attempt was refused — which, with no "
@@ -719,7 +1067,7 @@ def _html_coverage(report: RunReport) -> list[str]:
     for result in enforced:
         by_attack[result.attack.value] = by_attack.get(result.attack.value, 0) + 1
     parts += [
-        f"<p>{len(enforced)} cross-tenant attempt(s) were correctly refused.</p>",
+        f"<p>{_count(len(enforced), 'cross-tenant attempt')} were correctly refused.</p>",
         "<div class='scroll'><table><thead><tr><th>attack</th>"
         "<th class='num'>refused</th></tr></thead><tbody>",
         *[
@@ -732,7 +1080,7 @@ def _html_coverage(report: RunReport) -> list[str]:
     inconclusive = [r for r in report.results if r.verdict is Verdict.INCONCLUSIVE]
     if inconclusive:
         parts += [
-            f"<p>{len(inconclusive)} attempt(s) were <strong>inconclusive</strong> — the "
+            f"<p>{_count(len(inconclusive), 'attempt')} were <strong>inconclusive</strong> — the "
             "oracle could not decide, which is not the same as enforcement.</p>",
             "<ul>",
             *[
@@ -744,7 +1092,7 @@ def _html_coverage(report: RunReport) -> list[str]:
         ]
     if report.errors:
         parts += [
-            "<h2>Run notes</h2><ul>",
+            "<h3>Run notes</h3><ul>",
             *[f"<li>{_e(error)}</li>" for error in report.errors],
             "</ul>",
         ]

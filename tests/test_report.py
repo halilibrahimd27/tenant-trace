@@ -32,6 +32,8 @@ from tenanttrace.core.models import (
     utcnow,
 )
 from tenanttrace.core.report import (
+    _CSS,
+    INVALID_HEADLINE,
     read_report,
     redact_evidence,
     render,
@@ -328,3 +330,160 @@ def test_a_stored_run_report_can_be_read_back(tmp_path: Path) -> None:
     path = tmp_path / "report.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
     assert read_report(path).status is RunStatus.VALID
+
+
+# --------------------------------------------------------------------------- #
+# Access graph
+# --------------------------------------------------------------------------- #
+
+
+def _leaked_result(path: str = "/api/invoices") -> ProbeResult:
+    return ProbeResult(
+        attack=AttackName.LISTING,
+        endpoint=Endpoint(method=HttpMethod.GET, path=path, path_params=()),
+        actor=TenantLabel.A,
+        target=TenantLabel.B,
+        verdict=Verdict.LEAKED,
+        detail="canary found",
+    )
+
+
+def test_the_graph_draws_one_edge_per_proven_path() -> None:
+    """Every edge is a result that already exists — nothing speculative."""
+    page = render_html(_report(results=(_leaked_result(),)))
+    assert "<h2>Access graph</h2>" in page
+    assert page.count("class='edge") == 1
+
+
+def test_the_same_endpoint_proven_twice_is_one_path() -> None:
+    two = (_leaked_result(), _leaked_result())
+    assert render_html(_report(results=two)).count("class='edge") == 1
+
+
+def test_a_run_with_nothing_proven_draws_no_graph() -> None:
+    """An empty diagram would imply a picture was worth drawing."""
+    assert "<h2>Access graph</h2>" not in render_html(_report(results=(), findings=()))
+
+
+def test_the_graph_is_inline_svg_not_a_library() -> None:
+    page = render_html(_report(results=(_leaked_result(),)))
+    assert "<script" not in page
+    assert "viewBox" in page
+
+
+def test_hostile_endpoint_names_cannot_break_out_of_the_svg() -> None:
+    page = render_html(_report(results=(_leaked_result("/api/<script>x</script>"),)))
+    assert "<script>x</script>" not in page
+    assert "&lt;script&gt;" in page
+
+
+def test_the_summary_leads_with_stat_tiles() -> None:
+    """What needs attention has to read before the table that explains it."""
+    page = render_html(_report())
+    assert "class='tiles'" in page
+    assert page.index("class='tiles'") < page.index("Findings")
+
+
+# --------------------------------------------------------------------------- #
+# The verdict — the answer, before the method that produced it
+# --------------------------------------------------------------------------- #
+
+
+def test_a_leaking_run_leads_with_the_leak_count() -> None:
+    page = render_html(_report(results=(_leaked_result(),)))
+    assert "class='verdict bad'" in page
+    assert "1 confirmed cross-tenant leak</strong>" in page
+
+
+def test_a_clean_run_says_what_it_does_and_does_not_cover() -> None:
+    """'No findings' is not the same claim as 'this application is safe'."""
+    page = render_html(_report(findings=()))
+    assert "class='verdict good'" in page
+    assert "No cross-tenant access proven" in page
+    assert "not the whole application" in page
+
+
+def test_a_run_that_attempted_nothing_is_not_reported_as_clean() -> None:
+    page = render_html(_report(results=(), findings=()))
+    assert "class='verdict good'" not in page
+    assert "Nothing was tested" in page
+
+
+def test_an_invalid_run_gets_the_banner_and_no_second_verdict() -> None:
+    """Two verdicts on one page is one verdict too many."""
+    page = render_html(_report(status=RunStatus.INVALID))
+    assert INVALID_HEADLINE in page
+    assert "class='verdict " not in page
+
+
+def test_the_verdict_precedes_the_method() -> None:
+    page = render_html(_report(results=(_leaked_result(),)))
+    assert page.index("class='verdict") < page.index("<h2>Run integrity</h2>")
+    assert page.index("<h2>Findings</h2>") < page.index("Positive controls")
+
+
+# --------------------------------------------------------------------------- #
+# Navigation and plain language
+# --------------------------------------------------------------------------- #
+
+
+def test_many_findings_get_a_jump_list_linking_to_anchors() -> None:
+    findings = tuple(_finding(id=f"TT-000{i}", fingerprint=f"sha256:{i}") for i in range(1, 5))
+    page = render_html(_report(findings=findings))
+    assert "class='index'" in page
+    for finding in findings:
+        assert f"href='#{finding.id}'" in page
+        assert f"id='{finding.id}'" in page
+
+
+def test_a_short_report_is_not_padded_with_an_index() -> None:
+    assert "class='index'" not in render_html(_report())
+
+
+def test_the_report_explains_its_own_vocabulary() -> None:
+    page = render_html(_report())
+    assert "How to read this report" in page
+    for term in ("Confirmed", "Suspected", "Positive control", "Inconclusive"):
+        assert f"<dt>{term}</dt>" in page
+
+
+def test_counts_read_as_english_not_as_a_debug_log() -> None:
+    single = _report(
+        results=(_leaked_result(),),
+        endpoints_tested=1,
+        endpoints_discovered=1,
+    )
+    assert "(s)" not in render_html(single)
+    assert "1 cross-tenant attempt across 1 endpoint." in render_html(single)
+
+
+def test_the_footer_stays_one_sentence() -> None:
+    """A flex column would promote the inline <code> to its own row."""
+    assert "flex" not in _CSS[_CSS.index("footer {") : _CSS.index("footer {") + 220]
+
+
+def test_control_marks_are_glyphs_the_stylesheet_colours() -> None:
+    page = render_html(_report())
+    assert "class='mark'" in page
+    assert "✅" not in page
+
+
+def test_the_graph_carries_a_key_for_the_colours_it_uses() -> None:
+    high = ProbeResult(
+        attack=AttackName.AGGREGATE,
+        endpoint=Endpoint(method=HttpMethod.GET, path="/api/stats", path_params=()),
+        actor=TenantLabel.A,
+        target=TenantLabel.B,
+        verdict=Verdict.LEAKED,
+        detail="count leak",
+    )
+    page = render_html(_report(results=(_leaked_result(), high)))
+    assert "class='legend'" in page
+    assert page.count("<span class='sev-") >= 2
+
+
+def test_the_key_only_lists_severities_that_are_drawn() -> None:
+    page = render_html(_report(results=(_leaked_result(),)))
+    legend = page[page.index("class='legend'") :][:400]
+    assert "sev-critical" in legend
+    assert "sev-high" not in legend

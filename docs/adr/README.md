@@ -13,5 +13,6 @@ acceptance — superseded records get a new ADR that points back.
 | [0006](0006-seeder-owns-credentials.md) | The seeder's credentials win over configured ones | accepted |
 | [0007](0007-baseline-fingerprints.md) | What goes into a finding's fingerprint | accepted |
 | [0008](0008-differential-attribution.md) | Attacks establish a baseline before claiming a finding | accepted |
+| [0009](0009-access-graph-from-proven-results.md) | The access graph is drawn from proven results, not from a model | accepted |
 
 Copy [`template.md`](template.md) to start a new one.
