@@ -33,6 +33,7 @@ from pydantic import BaseModel, ConfigDict
 from tenanttrace import __version__
 from tenanttrace.core.fingerprint import compute_fingerprint
 from tenanttrace.core.models import Confidence, Finding, Severity, utcnow
+from tenanttrace.core.text import count
 
 __all__ = [
     "Baseline",
@@ -241,7 +242,7 @@ def gate(
 
     notes: list[str] = []
     if result.suppressed:
-        notes.append(f"{len(result.suppressed)} finding(s) accepted by the baseline")
+        notes.append(f"{count(len(result.suppressed), 'finding')} accepted by the baseline")
     if result.stale:
         notes.append(f"{len(result.stale)} baseline entr(y/ies) no longer reported — remove them")
     if suspected:
@@ -261,7 +262,7 @@ def gate(
         return GateDecision(
             failed=True,
             message=(
-                f"{len(gating)} new confirmed finding(s) at or above {fail_on.value} "
+                f"{count(len(gating), 'new confirmed finding')} at or above {fail_on.value} "
                 f"(worst: {worst.value}){suffix}"
             ),
             gating=gating,

@@ -46,6 +46,7 @@ import yaml
 
 from tenanttrace.core.config import Config
 from tenanttrace.core.models import Endpoint, HttpMethod
+from tenanttrace.core.text import count
 
 __all__ = [
     "EndpointInventory",
@@ -111,7 +112,7 @@ class EndpointInventory:
         warnings = list(self.warnings)
         dropped = len(self.endpoints) - len(kept)
         if dropped:
-            warnings.append(f"{dropped} endpoint(s) skipped by [probe] exclude_paths")
+            warnings.append(f"{count(dropped, 'endpoint')} skipped by [probe] exclude_paths")
         if len(kept) > config.probe.max_endpoints:
             warnings.append(
                 f"inventory truncated to {config.probe.max_endpoints} of {len(kept)} "
@@ -534,11 +535,11 @@ def _collect(
 
     if skipped_host:
         warnings.append(
-            f"{skipped_host} request(s) to other hosts were ignored — a capture is not "
+            f"{count(skipped_host, 'request')} to other hosts were ignored — a capture is not "
             "permission to probe third parties"
         )
     if skipped_static:
-        warnings.append(f"{skipped_static} static asset request(s) skipped")
+        warnings.append(f"{count(skipped_static, 'static asset request')} skipped")
     if not endpoints:
         warnings.append("no probe-worthy requests found in the capture")
 
