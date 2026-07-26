@@ -37,9 +37,10 @@ from tenanttrace.static.base import ParsedFile, ScopingSignal, StaticContext
 from tenanttrace.static.dataflow import (
     Definition,
     FunctionNode,
+    all_definitions,
     attribute_tail,
+    definitions_reaching,
     dotted_name,
-    reaching_definitions,
     taints_from,
 )
 from tenanttrace.static.scoping import PREDICATE_CALLS, detect_scoping
@@ -363,7 +364,7 @@ class PythonSQLAlchemyAdapter:
                     symbol,
                     node,
                     fn=node,
-                    definitions=reaching_definitions(node),
+                    definitions=all_definitions(node),
                     tainted=frozenset(
                         taints_from(
                             node,
@@ -434,7 +435,7 @@ class PythonSQLAlchemyAdapter:
             if key_expr is None:
                 continue
 
-            candidates = _resolve_strings(key_expr, scope.definitions)
+            candidates = _resolve_strings(key_expr, scope.definitions, node.lineno)
             if not candidates:
                 continue
             # Assumes a cache key that interpolates an object id but never the
@@ -477,7 +478,7 @@ class PythonSQLAlchemyAdapter:
         if dispatches:
             for call in dispatches:
                 for argument in (*call.args, *(kw.value for kw in call.keywords)):
-                    payloads.extend(_resolve_dicts(argument, scope.definitions))
+                    payloads.extend(_resolve_dicts(argument, scope.definitions, call.lineno))
         elif scope.fn is not None and _is_dispatch_name(scope.fn.name):
             # Assumes a dict handed to a dispatch call — or built in a function
             # named enqueue_*/dispatch_* — is the worker's payload; wrong for a
@@ -520,8 +521,18 @@ class PythonSQLAlchemyAdapter:
             # One hop of dataflow: a statement built over several assignments
             # (`stmt = select(X)` then `stmt = stmt.where(...)`) has its predicate
             # in a different statement from its model.
+            # Every binding of the name, not the function's exit state and not
+            # only the ones before this line. A query is routinely built across
+            # statements (`stmt = select(X)` then `stmt = stmt.where(...)`), so
+            # the predicate can live either side of the root — while the exit
+            # state dropped the earlier binding entirely and invented a missing
+            # filter on correctly-scoped code.
+            #
+            # Over-approximating is the safe direction here: an extra
+            # definition can only make the tenant look present, which loses a
+            # hypothesis rather than accusing correct code.
             for name in _assignment_targets(outer, parents):
-                for definition in scope.definitions.get(name, ()):
+                for definition in sorted(scope.definitions.get(name, ()), key=lambda d: d.line):
                     if definition.value is not None:
                         closure.extend(ast.walk(definition.value))
 
@@ -727,7 +738,9 @@ def _first_argument(call: ast.Call, keywords: Sequence[str]) -> ast.expr | None:
     return None
 
 
-def _resolve_strings(expr: ast.expr, definitions: dict[str, set[Definition]]) -> list[ast.expr]:
+def _resolve_strings(
+    expr: ast.expr, definitions: dict[str, set[Definition]], line: int | None = None
+) -> list[ast.expr]:
     """String-shaped expressions ``expr`` may be, following names one hop.
 
     One hop only: chasing a name through several assignments is where an
@@ -736,9 +749,10 @@ def _resolve_strings(expr: ast.expr, definitions: dict[str, set[Definition]]) ->
     if _is_string_shaped(expr):
         return [expr]
     if isinstance(expr, ast.Name):
+        bound = line if line is not None else getattr(expr, "lineno", 0)
         return [
             definition.value
-            for definition in sorted(definitions.get(expr.id, ()), key=lambda d: d.line)
+            for definition in definitions_reaching(definitions, expr.id, bound)
             if definition.value is not None and _is_string_shaped(definition.value)
         ]
     return []
@@ -764,18 +778,21 @@ def _is_dispatch_name(name: str) -> bool:
     return name.lower().startswith(_DISPATCH_NAME_PREFIXES)
 
 
-def _resolve_dicts(expr: ast.expr, definitions: dict[str, set[Definition]]) -> list[ast.Dict]:
+def _resolve_dicts(
+    expr: ast.expr, definitions: dict[str, set[Definition]], line: int | None = None
+) -> list[ast.Dict]:
     """Dict literals ``expr`` may be, unwrapping one serialisation call."""
     if isinstance(expr, ast.Dict):
         return [expr]
     if isinstance(expr, ast.Name):
+        bound = line if line is not None else getattr(expr, "lineno", 0)
         return [
             definition.value
-            for definition in definitions.get(expr.id, ())
+            for definition in definitions_reaching(definitions, expr.id, bound)
             if isinstance(definition.value, ast.Dict)
         ]
     if isinstance(expr, ast.Call) and _tail(expr.func) in {"dumps", "dump", "encode"}:
-        return [d for argument in expr.args for d in _resolve_dicts(argument, definitions)]
+        return [d for argument in expr.args for d in _resolve_dicts(argument, definitions, line)]
     return []
 
 
@@ -804,8 +821,10 @@ def _is_query_root(node: ast.Call, ctx: StaticContext) -> bool:
     # `session.get(Model, pk)` resolves the primary key and nothing else. The
     # model argument is what tells it apart from `cache.get(key)`.
     if tail in _PRIMARY_KEY_LOOKUPS and node.args:
-        first = node.args[0]
-        return isinstance(first, ast.Name) and _looks_like_model(first.id, ctx)
+        # `models.Invoice` as well as `Invoice`: `from app import models` is one
+        # of the two standard SQLAlchemy import styles, and requiring a bare
+        # Name here made the rule silently skip half of real codebases.
+        return _looks_like_model(_tail(node.args[0]), ctx)
     return False
 
 
@@ -825,8 +844,13 @@ def _scoped_models_in(closure: Sequence[ast.AST], ctx: StaticContext) -> tuple[l
     guessed = not ctx.scoped_models
     found: list[str] = []
     for node in closure:
-        if isinstance(node, ast.Name) and _looks_like_model(node.id, ctx) and node.id not in found:
-            found.append(node.id)
+        # Attribute as well as Name, so `select(models.Invoice)` is seen. The
+        # tail is what carries the model name in both styles.
+        if not isinstance(node, (ast.Name, ast.Attribute)):
+            continue
+        name = _tail(node)
+        if name and _looks_like_model(name, ctx) and name not in found:
+            found.append(name)
     return found, guessed
 
 

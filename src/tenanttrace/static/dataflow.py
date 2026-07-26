@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import ast
 import enum
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 
@@ -35,6 +35,8 @@ __all__ = [
     "FunctionNode",
     "assigned_names",
     "attribute_tail",
+    "all_definitions",
+    "definitions_reaching",
     "dotted_name",
     "reaching_definitions",
     "taints_from",
@@ -196,6 +198,74 @@ def reaching_definitions(fn: FunctionNode) -> dict[str, set[Definition]]:
         Name to the set of definitions that may be live at the function's exit.
     """
     return _run_block(fn.body, _parameter_defs(fn))
+
+
+def all_definitions(fn: FunctionNode) -> dict[str, set[Definition]]:
+    """Every binding in a function, with none killed by a later one.
+
+    :func:`reaching_definitions` answers a question about the function's
+    **exit**: a later assignment kills an earlier one, which is correct for
+    "what is live at the end" and wrong for "what did this expression see".
+
+    Three defects came from reading the exit state as if it were the second
+    question. A reused ``stmt``/``key``/``payload`` variable made every use in
+    the function resolve to the *last* assignment, which invented a missing
+    tenant filter on correctly-scoped code, hid a genuinely tenant-less job
+    payload behind a later payload that carried one, and pointed a cache-key
+    finding at a line whose key was fine.
+
+    This keeps every binding, so :func:`definitions_reaching` can select the
+    ones that precede a given use. It is deliberately flow-insensitive — no
+    branch reasoning, no ordering beyond line numbers — which keeps it inside
+    the "AST plus intraprocedural dataflow only" rule while removing the
+    killing behaviour that was the actual source of the wrong answers.
+    """
+    collected: dict[str, set[Definition]] = {}
+
+    def record(name: str, node: ast.AST, kind: DefKind) -> None:
+        collected.setdefault(name, set()).add(
+            Definition(name=name, node=node, line=getattr(node, "lineno", 0), kind=kind)
+        )
+
+    for argument in _all_args(fn):
+        record(argument.arg, argument, DefKind.PARAMETER)
+
+    for statement in ast.walk(fn):
+        if isinstance(statement, ast.Assign):
+            for target in statement.targets:
+                for name in assigned_names(target):
+                    record(name, statement, DefKind.ASSIGNMENT)
+        elif isinstance(statement, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
+            for name in assigned_names(statement.target):
+                record(name, statement, DefKind.ASSIGNMENT)
+        elif isinstance(statement, (ast.For, ast.AsyncFor)):
+            for name in assigned_names(statement.target):
+                record(name, statement, DefKind.FOR_TARGET)
+        elif isinstance(statement, (ast.With, ast.AsyncWith)):
+            for item in statement.items:
+                if item.optional_vars is not None:
+                    for name in assigned_names(item.optional_vars):
+                        record(name, statement, DefKind.WITH_TARGET)
+        elif isinstance(statement, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            for generator in statement.generators:
+                for name in assigned_names(generator.target):
+                    record(name, statement, DefKind.COMPREHENSION)
+
+    return collected
+
+
+def definitions_reaching(
+    definitions: Mapping[str, set[Definition]], name: str, line: int
+) -> list[Definition]:
+    """Definitions of ``name`` that could reach source line ``line``, in order.
+
+    Deliberately a MAY analysis: every definition at or above the line is kept,
+    not just the nearest. Branches assign at different lines and either may be
+    the one that ran, and over-approximating what an expression might have seen
+    fails towards "the tenant is present" — which loses a hypothesis rather
+    than inventing a finding.
+    """
+    return sorted((d for d in definitions.get(name, set()) if d.line <= line), key=lambda d: d.line)
 
 
 def _parameter_defs(fn: FunctionNode) -> Env:

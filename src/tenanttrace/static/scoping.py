@@ -100,6 +100,8 @@ _WEIGHT_INLINE_PREDICATE = 0.15
 
 # A mechanism was found, not just a naming convention.
 _GLOBAL_STRONG = 0.5
+# ...and naming evidence alone can never get there, however much of it there is.
+_CONVENTION_CEILING = _GLOBAL_STRONG - 0.05
 # Enough handlers filter by hand that "everyone remembers" is the house style.
 _MANUAL_MIN = 0.30
 # Below this, a global marker is a coincidence rather than a mechanism.
@@ -114,11 +116,16 @@ class ScopingEvidence:
         mode: The mode this observation supports.
         weight: 0..1 contribution to that mode's score.
         reason: A sentence for the report, naming file and line.
+        conventional: True when this is a naming convention rather than a
+            mechanism that rewrites queries. Convention evidence is capped
+            below the decision threshold, so no amount of well-named base
+            classes can flip the mode on its own.
     """
 
     mode: ScopingMode
     weight: float
     reason: str
+    conventional: bool = False
 
 
 # --------------------------------------------------------------------------- #
@@ -200,6 +207,7 @@ def _collect_global(file: ParsedFile, tenant_columns: Sequence[str]) -> list[Sco
                             _WEIGHT_TENANT_CONTEXTVAR,
                             f"a ContextVar named {label!r} at {file.rel_path}:{node.lineno} "
                             "carries the request's tenant out of band",
+                            conventional=True,
                         ),
                     )
 
@@ -214,6 +222,7 @@ def _collect_global(file: ParsedFile, tenant_columns: Sequence[str]) -> list[Sco
                             _WEIGHT_SCOPE_MIXIN,
                             f"model {node.name} at {file.rel_path}:{node.lineno} inherits "
                             f"{tail}, the base a global scope usually attaches to",
+                            conventional=True,
                         ),
                     )
     return list(found.values())
@@ -281,7 +290,20 @@ def decide(evidence: Sequence[ScopingEvidence]) -> ScopingSignal:
     """
     global_items = [e for e in evidence if e.mode is ScopingMode.GLOBAL]
     manual_items = [e for e in evidence if e.mode is ScopingMode.MANUAL]
-    global_score = min(1.0, sum(e.weight for e in global_items))
+
+    # Naming conventions are capped below the threshold, deliberately. A mixin
+    # called `TenantScoped` is emitted once per file that mentions it, so five
+    # model modules used to reach _GLOBAL_STRONG on names alone — and the
+    # comment on that constant says "a mechanism was found, not just a naming
+    # convention". Deciding GLOBAL switches off the missing-filter rule
+    # entirely, so an application that merely *names* things well would have
+    # had every unscoped query silently excused.
+    #
+    # Something that actually rewrites queries — with_loader_criteria, an ORM
+    # event hook — must be present for the mode to flip.
+    conventional = sum(e.weight for e in global_items if e.conventional)
+    mechanical = sum(e.weight for e in global_items if not e.conventional)
+    global_score = min(1.0, mechanical + min(conventional, _CONVENTION_CEILING))
     manual_score = min(1.0, sum(e.weight for e in manual_items))
 
     global_reasons = tuple(e.reason for e in global_items)

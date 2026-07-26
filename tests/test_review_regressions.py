@@ -440,3 +440,103 @@ def test_release_workflow_builds_the_runtime_target() -> None:
         __import__("yaml").safe_load((REPO_ROOT / ".github/workflows/release.yml").read_text())
     )
     assert '"target": "runtime"' in workflow
+
+
+# --------------------------------------------------------------------------- #
+# Static engine
+# --------------------------------------------------------------------------- #
+
+
+def _parse(name: str, source: str):  # type: ignore[no-untyped-def]
+    import ast as ast_module
+
+    from tenanttrace.static.base import ParsedFile
+
+    return ParsedFile(path=Path(name), rel_path=name, source=source, tree=ast_module.parse(source))
+
+
+def test_a_naming_convention_alone_never_decides_global_scoping() -> None:
+    """Deciding GLOBAL switches off the missing-filter rule entirely.
+
+    Mixin evidence was emitted once per file, so five well-named model modules
+    reached the threshold on names alone and silenced every unscoped query.
+    """
+    from tenanttrace.core.models import ScopingMode
+    from tenanttrace.static.scoping import detect_scoping
+
+    convention = [
+        _parse(f"models/m{i}.py", f"class M{i}(Base, TenantScoped):\n    pass\n") for i in range(6)
+    ]
+    convention.append(
+        _parse("ctx.py", 'from contextvars import ContextVar\ncur = ContextVar("current_tenant")\n')
+    )
+    assert detect_scoping(convention).mode is not ScopingMode.GLOBAL
+
+    with_mechanism = [
+        *convention,
+        _parse(
+            "scope.py",
+            "def install(s):\n"
+            "    s.add(with_loader_criteria(TenantScoped, lambda c: c.tenant_id == 1))\n",
+        ),
+    ]
+    assert detect_scoping(with_mechanism).mode is ScopingMode.GLOBAL
+
+
+def _scan_source(tmp_path: Path, source: str, **tenancy: Any):  # type: ignore[no-untyped-def]
+    from tenanttrace.core.config import Config, TargetConfig, TenancyConfig
+    from tenanttrace.static.engine import scan
+
+    (tmp_path / "app.py").write_text(source, encoding="utf-8")
+    config = Config(
+        target=TargetConfig(base_url="http://127.0.0.1"),
+        tenancy=TenancyConfig(scoping_mode="manual", **tenancy),
+    )
+    return scan(tmp_path, config)
+
+
+def test_qualified_model_references_are_seen(tmp_path: Path) -> None:
+    """`from app import models` is half of real SQLAlchemy codebases."""
+    result = _scan_source(
+        tmp_path,
+        "from sqlalchemy import select\n"
+        "from app import models\n\n"
+        "def listing(session):\n"
+        "    return session.scalars(select(models.Invoice)).all()\n\n"
+        "def detail(session, invoice_id):\n"
+        "    return session.get(models.Invoice, invoice_id)\n",
+        scoped_models=("Invoice",),
+    )
+    symbols = {f.location.split("::")[-1] for f in result.findings}
+    assert {"listing", "detail"} <= symbols, result.findings
+
+
+def test_a_reused_statement_variable_keeps_each_querys_own_predicate(tmp_path: Path) -> None:
+    """The exit-state map made a later reuse erase an earlier predicate."""
+    result = _scan_source(
+        tmp_path,
+        "from sqlalchemy import select\n\n"
+        "def two_queries(session, principal):\n"
+        "    stmt = select(Invoice).where(Invoice.tenant_id == principal.tenant_id)\n"
+        "    first = session.scalars(stmt).all()\n"
+        "    stmt = select(Invoice).where(Invoice.tenant_id == principal.tenant_id)\n"
+        "    return first, session.scalars(stmt).all()\n",
+        scoped_models=("Invoice",),
+    )
+    assert result.findings == (), [f.location for f in result.findings]
+
+
+def test_a_reused_payload_variable_does_not_hide_a_tenantless_dispatch(tmp_path: Path) -> None:
+    """The later payload carried a tenant and covered for the earlier one."""
+    result = _scan_source(
+        tmp_path,
+        "def enqueue_two(queue, invoice_id, tenant_id):\n"
+        '    payload = {"invoice_id": invoice_id}\n'
+        "    queue.publish(payload)\n"
+        '    payload = {"invoice_id": invoice_id, "tenant_id": tenant_id}\n'
+        "    queue.publish(payload)\n",
+    )
+    categories = [f.category for f in result.findings]
+    assert Category.TENANTLESS_JOB_PAYLOAD in categories, [
+        f.category.value for f in result.findings
+    ]
