@@ -1,0 +1,143 @@
+# The answer key.
+#
+# `make metrics` scores TenantTrace against this file: every entry under
+# `expected` must be reported (recall), and anything reported that is not in
+# `expected` — especially anything under `expect_clean` — counts against
+# precision.
+#
+# Rules for editing:
+#   * `category` must be one of Category in src/tenanttrace/core/models.py.
+#   * `severity` must be what severity.py assigns to that category. A label that
+#     disagrees with severity.py is a bug in the label, not in the tool.
+#   * `location` is "METHOD /path/{template}" for probe entries and
+#     "file.py::symbol" for static entries. Line numbers must never appear:
+#     they churn, and a label that expires when someone adds an import is worse
+#     than no label.
+#   * A hole with no label cannot be measured, so it does not count.
+
+version: 1
+
+targets:
+  vulnerable_app:
+    module: "fixtures.vulnerable_app.main:app"
+    scoping_mode: manual
+    expected:
+      - id: VULN-01
+        location: "GET /api/invoices/{invoice_id}"
+        category: cross_tenant_read
+        severity: critical
+        engine: probe
+        attack: idor
+        note: "H1 — session.get without a tenant predicate"
+
+      - id: VULN-02
+        location: "GET /api/documents"
+        category: listing_leak
+        severity: critical
+        engine: probe
+        attack: listing
+        note: "H2 — select(Document) with no tenant predicate returns every tenant's rows"
+
+      - id: VULN-03
+        location: "GET /api/stats"
+        category: aggregate_leak
+        severity: high
+        engine: probe
+        attack: aggregate
+        note: >-
+          H3 — invoice_count, document_count, customer_count and invoice_total
+          are all computed over the whole table
+
+      - id: VULN-04
+        location: "GET /api/customers"
+        category: param_override
+        severity: critical
+        engine: probe
+        attack: param_override
+        note: "H4 — the ?tenant_id query parameter is honoured instead of the JWT claim"
+
+      - id: VULN-05
+        location: "GET /api/documents/{document_id}"
+        category: cache_key_leak
+        severity: high
+        engine: probe
+        attack: cache
+        note: >-
+          H5 — the query is correctly scoped, but the response is cached under
+          "doc:{document_id}" with no tenant component and a hit is served
+          before the query runs
+
+      - id: VULN-06
+        location: "POST /api/invoices"
+        category: cross_tenant_write
+        severity: critical
+        engine: probe
+        attack: mass_assign
+        note: >-
+          H6 — mass assignment: a client-supplied tenant_id in the body places
+          the new invoice into another tenant. MUTATING; needs --allow-mutation.
+
+      - id: VULN-07
+        location: "fixtures/vulnerable_app/reports.py::monthly_revenue_report"
+        category: raw_sql_escape
+        severity: high
+        engine: static
+        note: >-
+          S1 — raw SQL aggregating across every tenant. No HTTP route reaches
+          it, so the prober structurally cannot see it.
+
+      - id: VULN-08
+        location: "fixtures/vulnerable_app/jobs.py::enqueue_invoice_export"
+        category: tenantless_job_payload
+        severity: medium
+        engine: static
+        note: "S2 — the job payload carries invoice_id and requested_by but no tenant"
+
+      - id: VULN-09
+        location: "fixtures/vulnerable_app/jobs.py::enqueue_invoice_export"
+        category: tenantless_cache_key
+        severity: medium
+        engine: static
+        note: 'S2 — the cache key "export:{invoice_id}" has no tenant component'
+
+    expect_clean:
+      - location: "GET /api/invoices"
+        reason: "correctly tenant-scoped list — negative control inside the leaky app"
+      - location: "POST /api/documents"
+        reason: "ignores any client-supplied tenant_id; ownership comes from the credential"
+      - location: "DELETE /api/invoices/{invoice_id}"
+        reason: "correctly tenant-scoped; another tenant's id returns 404"
+      - location: "fixtures/vulnerable_app/reports.py::revenue_for_tenant"
+        reason: "raw SQL, but the tenant is a bound parameter — flagging it is over-reporting"
+
+  safe_app:
+    module: "fixtures.safe_app.main:app"
+    scoping_mode: global
+    expected: []
+    expect_clean:
+      - location: "GET /api/admin/all-invoices"
+        reason: "intentional platform-admin endpoint; allowlisted by config"
+      - location: "GET /api/invoices"
+        reason: "global scope confines the SELECT to the caller's tenant"
+      - location: "POST /api/invoices"
+        reason: "input schema has no tenant_id; ownership comes from the credential"
+      - location: "GET /api/invoices/{invoice_id}"
+        reason: "global scope makes the lookup (tenant, id); another tenant's id 404s"
+      - location: "DELETE /api/invoices/{invoice_id}"
+        reason: "global scope applies to the lookup before the delete"
+      - location: "GET /api/documents"
+        reason: "global scope confines the SELECT to the caller's tenant"
+      - location: "POST /api/documents"
+        reason: "input schema has no tenant_id; ownership comes from the credential"
+      - location: "GET /api/documents/{document_id}"
+        reason: "cache key includes the tenant, so a hit cannot cross tenants"
+      - location: "GET /api/customers"
+        reason: "the ?tenant_id parameter is accepted for API parity and ignored"
+      - location: "POST /api/customers"
+        reason: "input schema has no tenant_id; ownership comes from the credential"
+      - location: "GET /api/stats"
+        reason: "aggregates are ORM SELECTs, so the global scope reaches them too"
+      - location: "POST /api/signup"
+        reason: "public route; creates the tenant it will then be scoped to"
+      - location: "GET /health"
+        reason: "public liveness probe; holds no tenant data"

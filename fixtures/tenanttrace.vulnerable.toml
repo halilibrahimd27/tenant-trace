@@ -1,0 +1,35 @@
+# Audit configuration for the deliberately vulnerable fixture application.
+#
+# Used by `make demo` and by the containerised demo. Override the target from
+# the command line when the app is somewhere else:
+#   tenanttrace probe -c fixtures/tenanttrace.vulnerable.toml --base-url http://vulnerable-app:8000
+
+[target]
+base_url = "http://127.0.0.1:8001"
+allowed_hosts = ["127.0.0.1", "localhost", "vulnerable-app"]
+spec = "openapi"
+spec_path = "http://127.0.0.1:8001/openapi.json"
+
+[seeder]
+adapter = "fixtures.seeder:FixtureSeeder"
+
+[tenancy]
+column = "tenant_id"
+scoping_mode = "manual"
+scoped_models = ["Invoice", "Document", "Customer"]
+cross_tenant_allowlist = ["/api/admin/*"]
+
+[probe]
+allow_mutation = true            # still requires --allow-mutation on the command line
+max_rps = 200.0                  # a local fixture; no reason to be gentle
+exclude_paths = ["/health", "/openapi.json", "/docs", "/redoc"]
+attacks = ["idor", "listing", "aggregate", "param_override", "cache", "mass_assign"]
+
+[static]
+path = "fixtures/vulnerable_app"
+adapter = "python_sqlalchemy"
+
+[report]
+fail_on = "high"
+formats = ["json", "md", "html"]
+out_dir = ".tenanttrace"

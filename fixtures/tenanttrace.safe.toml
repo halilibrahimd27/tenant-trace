@@ -1,0 +1,35 @@
+# Audit configuration for the correctly isolated fixture application.
+#
+# This one exists to prove the tool stays quiet when there is nothing to find —
+# including against the platform-admin endpoint, which crosses tenants on
+# purpose and is allow-listed below.
+
+[target]
+base_url = "http://127.0.0.1:8002"
+allowed_hosts = ["127.0.0.1", "localhost", "safe-app"]
+spec = "openapi"
+spec_path = "http://127.0.0.1:8002/openapi.json"
+
+[seeder]
+adapter = "fixtures.seeder:FixtureSeeder"
+
+[tenancy]
+column = "tenant_id"
+scoping_mode = "global"
+scoped_models = ["Invoice", "Document", "Customer"]
+cross_tenant_allowlist = ["/api/admin/*"]
+
+[probe]
+allow_mutation = true
+max_rps = 200.0
+exclude_paths = ["/health", "/openapi.json", "/docs", "/redoc"]
+attacks = ["idor", "listing", "aggregate", "param_override", "cache", "mass_assign"]
+
+[static]
+path = "fixtures/safe_app"
+adapter = "python_sqlalchemy"
+
+[report]
+fail_on = "high"
+formats = ["json", "md", "html"]
+out_dir = ".tenanttrace"
