@@ -39,6 +39,7 @@ from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
 import httpx
 import yaml
@@ -187,8 +188,37 @@ def _body_fields(document: Mapping[str, Any], operation: Mapping[str, Any]) -> t
     return ()
 
 
+def _base_path(document: Mapping[str, Any]) -> str:
+    """The prefix every path in this document hangs off.
+
+    Swagger 2.0 puts it in ``basePath``; OpenAPI 3 puts it in the path
+    component of ``servers[0].url``. Ignoring it is not a cosmetic bug: an API
+    served under ``/api/v1`` would be probed at ``/projects`` instead of
+    ``/api/v1/projects``, every request would 404, and a run against a real
+    application would come back with no coverage at all.
+    """
+    base = document.get("basePath")
+    if isinstance(base, str) and base.startswith("/"):
+        return base.rstrip("/")
+
+    servers = document.get("servers")
+    if isinstance(servers, Sequence) and not isinstance(servers, (str, bytes)):
+        for server in servers:
+            url = server.get("url") if isinstance(server, Mapping) else None
+            if not isinstance(url, str):
+                continue
+            # A server URL may be absolute or just a path, and may contain
+            # {variable} placeholders we cannot resolve — those are left alone
+            # rather than guessed at.
+            path = urlsplit(url).path if "://" in url else url
+            trimmed = path.rstrip("/")
+            if trimmed.startswith("/"):
+                return trimmed
+    return ""
+
+
 def parse_openapi(document: Any, *, source: str = "") -> EndpointInventory:
-    """Build an inventory from an OpenAPI 3.x document."""
+    """Build an inventory from an OpenAPI 3.x or Swagger 2.0 document."""
     if not isinstance(document, Mapping):
         msg = "OpenAPI document must be a JSON/YAML object"
         raise SpecError(msg)
@@ -196,6 +226,8 @@ def parse_openapi(document: Any, *, source: str = "") -> EndpointInventory:
     if not isinstance(paths, Mapping):
         msg = "OpenAPI document has no 'paths' object — nothing to probe"
         raise SpecError(msg)
+
+    base = _base_path(document)
 
     endpoints: list[Endpoint] = []
     warnings: list[str] = []
@@ -249,7 +281,7 @@ def parse_openapi(document: Any, *, source: str = "") -> EndpointInventory:
             endpoints.append(
                 Endpoint(
                     method=HttpMethod(method_name),
-                    path=path,
+                    path=f"{base}{path}" if base else path,
                     operation_id=_as_str(operation.get("operationId")),
                     summary=_as_str(operation.get("summary")),
                     path_params=tuple(path_params),

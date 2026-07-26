@@ -24,6 +24,7 @@ from tenanttrace.probe.spec import (
     SpecError,
     load_inventory,
     parse_har,
+    parse_openapi,
     parse_postman,
     templatize,
 )
@@ -304,3 +305,62 @@ def test_config_accepts_the_capture_formats(tmp_path: Path, kind: str) -> None:
     inventory = load_inventory(load_config(config_file), None)
     assert len(inventory) >= 1
     assert all(e.path.startswith("/") for e in inventory.endpoints)
+
+
+# --------------------------------------------------------------------------- #
+# Base paths — found by pointing the tool at a real Swagger 2.0 API
+# --------------------------------------------------------------------------- #
+
+
+def test_swagger2_base_path_is_prepended() -> None:
+    """Ignoring `basePath` sends every request to a 404.
+
+    A real target (Vikunja) serves 169 operations under `/api/v1`. Without
+    this, all of them would have been probed at the wrong path, every request
+    would have been refused, and the run would have come back with no coverage
+    at all — saved only by the positive controls failing.
+    """
+    document = {
+        "swagger": "2.0",
+        "basePath": "/api/v1",
+        "paths": {"/projects": {"get": {}}, "/projects/{id}": {"get": {}}},
+    }
+    assert {e.path for e in parse_openapi(document).endpoints} == {
+        "/api/v1/projects",
+        "/api/v1/projects/{id}",
+    }
+
+
+def test_openapi3_server_path_is_prepended() -> None:
+    document = {
+        "openapi": "3.1.0",
+        "servers": [{"url": "https://api.example.com/v2"}],
+        "paths": {"/invoices": {"get": {}}},
+    }
+    assert parse_openapi(document).endpoints[0].path == "/v2/invoices"
+
+
+def test_a_server_without_a_path_component_adds_nothing() -> None:
+    document = {
+        "openapi": "3.1.0",
+        "servers": [{"url": "https://api.example.com"}],
+        "paths": {"/invoices": {"get": {}}},
+    }
+    assert parse_openapi(document).endpoints[0].path == "/invoices"
+
+
+def test_a_document_with_no_base_path_is_unchanged() -> None:
+    document = {"openapi": "3.1.0", "paths": {"/invoices": {"get": {}}}}
+    assert parse_openapi(document).endpoints[0].path == "/invoices"
+
+
+def test_base_path_survives_endpoint_classification() -> None:
+    """The prefix must not stop an object endpoint being recognised as one."""
+    document = {
+        "swagger": "2.0",
+        "basePath": "/api/v1",
+        "paths": {"/projects": {"get": {}}, "/projects/{id}": {"get": {}}},
+    }
+    inventory = parse_openapi(document)
+    assert {e.path for e in inventory.objects()} == {"/api/v1/projects/{id}"}
+    assert {e.path for e in inventory.collections()} == {"/api/v1/projects"}
