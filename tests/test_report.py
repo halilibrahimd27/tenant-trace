@@ -514,3 +514,63 @@ def test_the_key_only_lists_severities_that_are_drawn() -> None:
     legend = page[page.index("class='legend'") :][:400]
     assert "sev-critical" in legend
     assert "sev-high" not in legend
+
+
+# --------------------------------------------------------------------------- #
+# The graph has to say what kind of path it is drawing
+# --------------------------------------------------------------------------- #
+
+
+def _leak(path: str, actor: TenantLabel, category: Category | None = None) -> ProbeResult:
+    return ProbeResult(
+        attack=AttackName.IDOR,
+        endpoint=Endpoint(method=HttpMethod.GET, path=path, path_params=()),
+        actor=actor,
+        target=TenantLabel.B if actor is TenantLabel.A else TenantLabel.A,
+        verdict=Verdict.LEAKED,
+        detail="leak",
+        category=category,
+    )
+
+
+def test_a_public_endpoint_is_drawn_from_anyone_not_from_a_tenant() -> None:
+    """Drawing it tenant-to-tenant claims a boundary failed where none exists."""
+    page = render_html(
+        _report(results=(_leak("/api/assets/{id}", TenantLabel.A, Category.PUBLIC_ENDPOINT),))
+    )
+    assert ">anyone</text>" in page
+    assert "edge sev-high public" in page
+    assert "no credential needed" in page
+    assert "tenant A</text>" not in page
+
+
+def test_a_public_endpoint_does_not_also_get_per_tenant_edges() -> None:
+    """The weaker claim is implied by the stronger one; drawing both triples
+    the lines for a single fact."""
+    results = (
+        _leak("/api/assets/{id}", TenantLabel.A, Category.PUBLIC_ENDPOINT),
+        _leak("/api/assets/{id}", TenantLabel.A),
+        _leak("/api/assets/{id}", TenantLabel.B),
+    )
+    assert render_html(_report(results=results)).count("class='edge") == 1
+
+
+def test_both_directions_on_one_endpoint_is_one_broken_endpoint() -> None:
+    results = (_leak("/api/x", TenantLabel.A), _leak("/api/x", TenantLabel.B))
+    page = render_html(_report(results=results))
+    assert page.count("class='edge") == 1
+    assert "tenant A↔B" in page
+    assert "proven in both directions" in page
+
+
+def test_one_direction_stays_one_direction() -> None:
+    page = render_html(_report(results=(_leak("/api/x", TenantLabel.A),)))
+    assert "tenant A</text>" in page
+    assert "↔" not in page
+
+
+def test_the_caption_says_what_is_not_drawn() -> None:
+    """A short graph must not read as a thorough audit."""
+    page = render_html(_report(results=(_leak("/api/x", TenantLabel.A),)))
+    assert "could not be judged" in page
+    assert "not the same as a thorough audit" in page

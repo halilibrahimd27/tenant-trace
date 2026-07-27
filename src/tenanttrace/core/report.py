@@ -25,6 +25,7 @@ from typing import Any
 
 from tenanttrace.core.models import (
     CANARY_RE,
+    Category,
     Confidence,
     ControlResult,
     Evidence,
@@ -570,6 +571,10 @@ svg.graph .edge.sev-high     { stroke:var(--high); stroke-width:1.5; opacity:.75
 svg.graph .edge.sev-medium   { stroke:var(--medium); }
 svg.graph .edge.sev-low      { stroke:var(--low); }
 svg.graph .node rect { fill:var(--card); stroke:var(--accent); stroke-width:1.2; }
+/* "anyone" is not a tenant, and the drawing should not imply it is. */
+svg.graph .node.anyone rect { stroke:var(--high); stroke-dasharray:3 2; }
+svg.graph .node.anyone text { fill:var(--high); }
+svg.graph .edge.public { stroke-dasharray:5 3; }
 svg.graph .node text { fill:var(--ink); font-size:12px;
                        font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
 svg.graph .node.actor text { font-family:inherit; font-weight:620; font-size:12px; }
@@ -587,6 +592,10 @@ svg.graph .node.target.sev-medium circle   { fill:var(--medium); }
           font-size:.72rem; color:var(--muted); letter-spacing:.04em; }
 .legend span { display:inline-flex; align-items:center; gap:.35rem; }
 .legend i { width:1.1rem; height:2px; border-radius:1px; background:currentColor; }
+.legend .dashed { color:var(--high); }
+.legend .dashed i { background:repeating-linear-gradient(to right,
+    currentColor 0 5px, transparent 5px 8px); border-radius:0; }
+.legend .note { color:var(--muted); letter-spacing:.02em; }
 .legend .sev-critical { color:var(--critical); }
 .legend .sev-high { color:var(--high); }
 .legend .sev-medium { color:var(--medium); }
@@ -978,42 +987,81 @@ def _html_graph(report: RunReport) -> list[str]:
     table cannot say.
 
     Nothing here is new analysis. Every edge is a ``ProbeResult`` that already
-    exists: a ``LEAKED`` verdict is an edge, an ``ENFORCED`` one is a
-    non-edge. That keeps the picture as trustworthy as the findings — it cannot
-    show a path that was not actually walked.
+    exists: a ``LEAKED`` verdict is an edge, an ``ENFORCED`` one is a non-edge.
+    That keeps the picture as trustworthy as the findings — it cannot show a
+    path that was not actually walked (ADR-0009).
 
-    Drawn as inline SVG because the report has to stay a single file with no
-    outbound requests, and a charting library would be both.
+    Three things the drawing has to get right, each learned from a real run:
+
+    * **A public endpoint is not a tenant-to-tenant path.** Drawing it as one
+      says the boundary between two tenants failed, when in fact there is no
+      boundary on that route at all. It gets its own source node — *anyone* —
+      and a dashed edge (ADR-0011).
+    * **The same endpoint proven in both directions is one broken endpoint**,
+      not two findings. Merged, and marked as reciprocal.
+    * **What is missing is part of the picture.** The caption says how many
+      attempts were refused and how many could not be judged, so a sparse
+      graph cannot be read as a thorough one.
+
+    Inline SVG because the report must stay a single file with no outbound
+    requests, and a charting library would be both.
     """
     leaked = [r for r in report.results if r.verdict is Verdict.LEAKED]
     if not leaked:
         return []
 
-    # One edge per (actor, endpoint): the same endpoint proven twice in one
-    # direction is one path, not two. Where two attacks proved the same edge,
-    # the worse one names it — the picture should not under-report.
+    ANYONE = "\u2205"  # the source that is not a tenant
+
+    # Worst severity wins per edge; the picture must not under-report.
     edges: dict[tuple[str, str], Severity] = {}
+    public: set[str] = set()
     for result in leaked:
-        key = (result.actor.value, result.endpoint.key)
-        severity = severity_for(result.category_of())
+        category = result.category_of()
+        source = ANYONE if category is Category.PUBLIC_ENDPOINT else result.actor.value
+        if category is Category.PUBLIC_ENDPOINT:
+            public.add(result.endpoint.key)
+        key = (source, result.endpoint.key)
+        severity = severity_for(category)
         if key not in edges or severity.rank > edges[key].rank:
             edges[key] = severity
 
-    actors = sorted({actor for actor, _ in edges})
-    targets = sorted({endpoint for _, endpoint in edges})
+    # An endpoint reachable by anyone needs no per-tenant edges as well: the
+    # weaker claim is implied by the stronger one, and drawing both triples the
+    # lines for a single fact.
+    edges = {
+        (source, target): severity
+        for (source, target), severity in edges.items()
+        if source == ANYONE or target not in public
+    }
 
-    # A node inherits the worst path that reaches it, for the same reason.
+    # Both directions on one endpoint is one broken endpoint.
+    reciprocal = {
+        target
+        for target in {t for _, t in edges}
+        if len({s for s, t in edges if t == target and s != ANYONE}) > 1
+    }
+    if reciprocal:
+        merged: dict[tuple[str, str], Severity] = {}
+        for (source, target), severity in edges.items():
+            both = target in reciprocal and source != ANYONE
+            key = ("A\u2194B", target) if both else (source, target)
+            if key not in merged or severity.rank > merged[key].rank:
+                merged[key] = severity
+        edges = merged
+
+    sources = sorted({s for s, _ in edges}, key=lambda s: (s == ANYONE, s))
+    targets = sorted({t for _, t in edges})
     node_severity = {
-        target: max((s for (_, t), s in edges.items() if t == target), key=lambda s: s.rank)
+        target: max((sev for (_, t), sev in edges.items() if t == target), key=lambda s: s.rank)
         for target in targets
     }
 
     row_h, pad_y = 34, 26
-    height = max(len(targets), len(actors)) * row_h + pad_y * 2
-    left_x, right_x = 96, 400
+    height = max(len(targets), len(sources)) * row_h + pad_y * 2
+    left_x, right_x = 104, 400
     label_x = right_x + 14
     # Endpoint keys are set in a monospace face; ~7.1px per character at 13px
-    # is close enough to keep the longest one inside the canvas.
+    # keeps the longest one inside the canvas.
     width = int(label_x + max(len(t) for t in targets) * 7.1 + 24)
 
     def spread(items: list[str]) -> dict[str, float]:
@@ -1022,31 +1070,45 @@ def _html_graph(report: RunReport) -> list[str]:
             for i, item in enumerate(items)
         }
 
-    actor_y, target_y = spread(actors), spread(targets)
+    source_y, target_y = spread(sources), spread(targets)
+
+    enforced = len(_enforced(report))
+    undecided = len([r for r in report.results if r.verdict is Verdict.INCONCLUSIVE])
+    caption = (
+        f"Every line is an access this run proved. {_count(enforced, 'attempt')} "
+        f"{'was' if enforced == 1 else 'were'} refused and "
+        f"{_count(undecided, 'attempt')} could not be judged; neither is drawn, so a "
+        "short graph is not the same as a thorough audit."
+    )
 
     parts: list[str] = [
         "<h2>Access graph</h2>",
-        "<p class='meta'>Every line is a cross-tenant access this run proved. "
-        "Attempts the application refused are not drawn — they are counted below.</p>",
+        f"<p class='meta'>{_e(caption)}</p>",
         "<div class='scroll'>",
         f"<svg class='graph' viewBox='0 0 {width} {height}' "
         f"style='max-width:{width}px' role='img' "
         f"aria-label='Proven cross-tenant access paths'>",
     ]
 
-    for (actor, target), severity in edges.items():
-        y1, y2 = actor_y[actor], target_y[target]
+    for (source, target), severity in edges.items():
+        y1, y2 = source_y[source], target_y[target]
         mid = (left_x + right_x) / 2
+        anyone = source == ANYONE
+        classes = f"edge sev-{_e(severity.value)}" + (" public" if anyone else "")
+        who = "anyone, with no credential" if anyone else f"tenant {_e(source)}"
         parts.append(
-            f"<path class='edge sev-{_e(severity.value)}' "
+            f"<path class='{classes}' "
             f"d='M{left_x} {y1:.1f} C{mid} {y1:.1f} {mid} {y2:.1f} {right_x - 5} {y2:.1f}'>"
-            f"<title>tenant {_e(actor)} → {_e(target)} ({_e(severity.value)})</title></path>"
+            f"<title>{who} \u2192 {_e(target)} ({_e(severity.value)})</title></path>"
         )
 
-    for actor, y in actor_y.items():
+    for source, y in source_y.items():
+        anyone = source == ANYONE
+        label = "anyone" if anyone else f"tenant {_e(source)}"
+        css = "node actor" + (" anyone" if anyone else "")
         parts.append(
-            f"<g class='node actor'><rect x='24' y='{y - 12:.1f}' width='72' height='24' rx='6'/>"
-            f"<text x='60' y='{y + 4:.1f}' text-anchor='middle'>tenant {_e(actor)}</text></g>"
+            f"<g class='{css}'><rect x='24' y='{y - 12:.1f}' width='80' height='24' rx='6'/>"
+            f"<text x='64' y='{y + 4:.1f}' text-anchor='middle'>{label}</text></g>"
         )
 
     for target, y in target_y.items():
@@ -1058,10 +1120,15 @@ def _html_graph(report: RunReport) -> list[str]:
         )
 
     parts += ["</svg>", "</div>"]
-    present = sorted(set(edges.values()), key=lambda sev: -sev.rank)
+
     keys = "".join(
-        f"<span class='sev-{_e(sev.value)}'><i></i>{_e(sev.value)}</span>" for sev in present
+        f"<span class='sev-{_e(sev.value)}'><i></i>{_e(sev.value)}</span>"
+        for sev in sorted(set(edges.values()), key=lambda sev: -sev.rank)
     )
+    if any(s == ANYONE for s, _ in edges):
+        keys += "<span class='dashed'><i></i>no credential needed</span>"
+    if reciprocal:
+        keys += "<span class='dim note'>\u2194 proven in both directions</span>"
     parts.append(f"<div class='legend'>{keys}</div>")
     return parts
 
