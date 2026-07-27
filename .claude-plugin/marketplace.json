@@ -1,0 +1,17 @@
+{
+  "name": "tenant-trace",
+  "owner": {
+    "name": "halilibrahimd27",
+    "url": "https://github.com/halilibrahimd27"
+  },
+  "metadata": {
+    "description": "TenantTrace — prove whether tenant A can reach tenant B's data."
+  },
+  "plugins": [
+    {
+      "name": "tenant-trace",
+      "source": "./plugin",
+      "description": "Flags queries with no visible tenant predicate as you write them, and carries how to run a real cross-tenant audit."
+    }
+  ]
+}

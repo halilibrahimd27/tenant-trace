@@ -13,7 +13,6 @@
     "bola",
     "owasp-api1"
   ],
-  "hooks": "./hooks/hooks.json",
   "author": {
     "name": "halilibrahimd27",
     "url": "https://github.com/halilibrahimd27"

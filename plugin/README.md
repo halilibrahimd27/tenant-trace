@@ -18,10 +18,13 @@ requires an explicit authorization flag outside loopback.
 ## Install
 
 ```bash
-claude plugin install tenant-trace@<marketplace>
-# or, from a clone:
-claude plugin install ./plugin
+git clone https://github.com/halilibrahimd27/tenant-trace
+claude plugin marketplace add ./tenant-trace
+claude plugin install tenant-trace@tenant-trace
 ```
+
+The repository doubles as its own marketplace — `.claude-plugin/marketplace.json`
+at the root points at `./plugin`.
 
 The hook needs the `tenanttrace` CLI:
 
