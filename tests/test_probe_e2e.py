@@ -245,9 +245,15 @@ def test_dry_run_sends_no_attack_requests(
         ProbeOptions(dry_run=True, transport=vulnerable_transport, write_artifacts=False),
     )
     assert outcome.plan
-    assert outcome.report.findings == ()
     assert outcome.report.results == ()
-    assert any("dry run" in e for e in outcome.report.errors)
+    assert outcome.artifact_dir is None, "a plan has nothing to record"
+
+    # INVALID, carrying the harness marker — never a VALID report with an
+    # empty finding list, which renders in every format as an audit that
+    # passed.
+    assert outcome.report.status is RunStatus.INVALID
+    assert [f.category for f in outcome.report.findings] == [Category.HARNESS_ERROR]
+    assert "dry run" in outcome.report.findings[0].title.lower()
 
 
 def test_allowlisted_paths_are_marked_as_skipped_in_the_plan(
