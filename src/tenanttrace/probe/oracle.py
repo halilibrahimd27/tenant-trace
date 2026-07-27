@@ -108,6 +108,10 @@ class ResponseFacts:
     json_body: Any | None = None
     transport_error: str | None = None
     truncated: bool = False
+    # What we asked for. The oracle needs it to tell "the application returned
+    # the victim's id" from "the application echoed the id we just sent it".
+    request_url: str | None = None
+    request_body: str | None = None
 
     @property
     def failed(self) -> bool:
@@ -129,6 +133,27 @@ class OracleDecision:
     @property
     def leaked(self) -> bool:
         return self.verdict is Verdict.LEAKED
+
+
+def _was_sent(identifier: str, facts: ResponseFacts) -> bool:
+    """Did this identifier travel out in the request we are now judging?
+
+    ``sent_ids`` already exists for this, but it depends on every attack module
+    remembering to populate it — and one did not. Once the prober began putting
+    the *victim tenant's own selector* into a path parameter
+    (``/api/space/{spaceId}/billing``), a 404 body echoing that selector back
+    was read as the application volunteering another tenant's id, and seven
+    critical findings were reported against an application that had refused
+    every one of them.
+
+    So the oracle now defends itself from the request rather than trusting the
+    caller. A future attack module cannot reintroduce this by forgetting.
+    """
+    url = facts.request_url
+    if url is not None and identifier in url:
+        return True
+    body = facts.request_body
+    return body is not None and identifier in body
 
 
 def iter_json_strings(node: Any, *, depth: int = 0, max_depth: int = 64) -> Iterator[str]:
@@ -363,11 +388,17 @@ class TenantOracle:
         back: ``{"detail": "Invoice 018f-… not found"}``. Counting that would
         report a critical against an application that did the right thing.
 
+        **Ids that travelled out in this request** are dropped by
+        :func:`_was_sent`, which reads the recorded URL and body rather than
+        trusting the caller to have listed them.
+
         **Ids too short to be evidence** are dropped by
         :func:`scan_for_identifiers` — see :data:`MIN_TRUSTWORTHY_ID_LENGTH`.
         """
         echoed = {str(i) for i in sent_ids}
-        candidates = [i for i in sorted(self._victim_ids) if i not in echoed]
+        candidates = [
+            i for i in sorted(self._victim_ids) if i not in echoed and not _was_sent(i, facts)
+        ]
         return scan_for_identifiers(facts, candidates)
 
     def unjudgeable_ids(self) -> tuple[str, ...]:
@@ -748,6 +779,8 @@ def facts_from_parts(
     status: int | None,
     text: str,
     transport_error: str | None = None,
+    request_url: str | None = None,
+    request_body: str | None = None,
 ) -> ResponseFacts:
     """Build :class:`ResponseFacts`, decoding JSON when the body permits it.
 
@@ -773,6 +806,8 @@ def facts_from_parts(
         json_body=parsed,
         transport_error=transport_error,
         truncated=truncated,
+        request_url=request_url,
+        request_body=request_body,
     )
 
 

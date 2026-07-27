@@ -87,6 +87,8 @@ class Exchange:
             status=self.status,
             text=self.response_text,
             transport_error=self.transport_error,
+            request_url=self.url,
+            request_body=self.request_body,
         )
 
     def evidence(self, *, snippet_chars: int = 2000) -> Evidence:

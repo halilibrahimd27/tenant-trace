@@ -436,3 +436,73 @@ def test_a_speculative_path_does_not_excuse_a_403(oracle) -> None:  # type: igno
             facts_from_parts(status=status, text=""), mode=AccessMode.OBJECT, speculative_path=True
         )
         assert decision.verdict is Verdict.ENFORCED
+
+
+# --------------------------------------------------------------------------- #
+# The oracle defends itself from its own request
+#
+# Regression: once the prober began substituting the victim tenant's selector
+# into a path parameter (/api/space/{spaceId}/billing), a 404 body echoing that
+# selector back was read as the application volunteering another tenant's id.
+# Seven criticals were reported against an application that refused every one.
+# --------------------------------------------------------------------------- #
+
+
+def test_an_id_echoed_back_from_our_own_url_is_not_a_leak() -> None:
+    victim = make_tenant(TenantLabel.B, record_ids=("spcmREThZd9QRqLb0Nc",))
+    oracle = TenantOracle(actor=make_tenant(TenantLabel.A), victim=victim)
+
+    decision = oracle.judge(
+        facts_from_parts(
+            status=404,
+            text='{"message":"Space spcmREThZd9QRqLb0Nc not found"}',
+            request_url="http://x/api/space/spcmREThZd9QRqLb0Nc/billing",
+        ),
+        mode=AccessMode.OBJECT,
+    )
+    assert decision.verdict is Verdict.ENFORCED
+
+
+def test_an_id_echoed_back_from_our_own_body_is_not_a_leak() -> None:
+    victim = make_tenant(TenantLabel.B, record_ids=("spcmREThZd9QRqLb0Nc",))
+    oracle = TenantOracle(actor=make_tenant(TenantLabel.A), victim=victim)
+
+    ids = oracle.leaked_ids(
+        facts_from_parts(
+            status=200,
+            text='{"echo":"spcmREThZd9QRqLb0Nc"}',
+            request_body='{"spaceId":"spcmREThZd9QRqLb0Nc"}',
+        )
+    )
+    assert ids == ()
+
+
+def test_an_id_we_never_sent_is_still_a_leak() -> None:
+    """The guard must not swallow the signal it exists to protect."""
+    victim = make_tenant(TenantLabel.B, record_ids=("spcmREThZd9QRqLb0Nc",))
+    oracle = TenantOracle(actor=make_tenant(TenantLabel.A), victim=victim)
+
+    decision = oracle.judge(
+        facts_from_parts(
+            status=200,
+            text='{"spaces":[{"id":"spcmREThZd9QRqLb0Nc"}]}',
+            request_url="http://x/api/space",
+        ),
+        mode=AccessMode.COLLECTION,
+    )
+    assert decision.verdict is Verdict.LEAKED
+
+
+def test_the_canary_still_wins_even_when_the_id_was_sent() -> None:
+    victim = make_tenant(TenantLabel.B, canary="tt-canary-B-bbbbbbbbbbbbbbbb", record_ids=("spcX",))
+    oracle = TenantOracle(actor=make_tenant(TenantLabel.A), victim=victim)
+
+    decision = oracle.judge(
+        facts_from_parts(
+            status=200,
+            text='{"note":"tt-canary-B-bbbbbbbbbbbbbbbb"}',
+            request_url="http://x/api/space/spcX/billing",
+        ),
+        mode=AccessMode.OBJECT,
+    )
+    assert decision.verdict is Verdict.LEAKED
