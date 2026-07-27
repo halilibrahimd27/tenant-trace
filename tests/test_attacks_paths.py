@@ -111,3 +111,66 @@ def test_an_attack_that_establishes_a_differential_can_overrule_itself() -> None
         category=Category.PUBLIC_ENDPOINT,
     )
     assert result.category_of() is Category.PUBLIC_ENDPOINT
+
+
+# --------------------------------------------------------------------------- #
+# resource_name: the segment before the LAST parameter, not the first
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("path", "params", "expected"),
+    [
+        ("/api/v1/accounts/{account_id}/contacts/{id}", ("account_id", "id"), "contact"),
+        ("/admin/realms/{realm}/users/{user-id}", ("realm", "user-id"), "user"),
+        ("/api/content/{app}/{schema}/{id}", ("app", "schema", "id"), "content"),
+        ("/api/invoices/{id}", ("id",), "invoice"),
+        ("/public/api/v1/inboxes/{inbox_identifier}", ("inbox_identifier",), "inbox"),
+        ("/api/entries/{id}", ("id",), "entry"),
+        ("/api/classes/{id}", ("id",), "class"),
+        ("/api/database/rows/table/{table_id}/", ("table_id",), "table"),
+    ],
+)
+def test_resource_name(path: str, params: tuple[str, ...], expected: str) -> None:
+    """Breaking at the first { made all 209 Keycloak endpoints resolve to 'realm'."""
+    from tenanttrace.probe.attacks.base import resource_name
+
+    assert resource_name(endpoint(path, *params)) == expected
+
+
+# --------------------------------------------------------------------------- #
+# A request that addressed nothing is not evidence of enforcement
+# --------------------------------------------------------------------------- #
+
+
+def test_an_id_of_the_wrong_kind_makes_the_path_speculative() -> None:
+    """A Contact id sent to /Campaign/{id} 404s because no such campaign exists."""
+    one_slot = endpoint("/api/v1/Campaign/{id}", "id")
+    assert is_speculative_path(one_slot, DEFAULTS, matched_kind=False)
+    assert not is_speculative_path(one_slot, DEFAULTS, matched_kind=True)
+
+
+def test_kind_matching_does_not_rescue_a_multi_slot_path() -> None:
+    both = endpoint("/api/{doc_id}/versions/{version_id}", "doc_id", "version_id")
+    assert is_speculative_path(both, DEFAULTS, matched_kind=True)
+
+
+def test_candidate_ids_says_whether_it_knew_what_it_was_doing() -> None:
+    from tenanttrace.core.models import SeededRecord
+    from tenanttrace.probe.attacks.base import candidate_ids
+
+    tenant = TenantContext(
+        label=TenantLabel.B,
+        tenant_id="2",
+        canary="tt-canary-B-abcdef01",
+        records=(
+            SeededRecord(kind="contact", id="ct-1", canary="c1", owner=TenantLabel.B),
+            SeededRecord(kind="lead", id="ld-1", canary="c2", owner=TenantLabel.B),
+        ),
+    )
+    matched = candidate_ids(endpoint("/api/contacts/{id}", "id"), tenant)
+    assert matched.matched_kind and matched.ids == ("ct-1",)
+
+    guessed = candidate_ids(endpoint("/api/campaigns/{id}", "id"), tenant)
+    assert not guessed.matched_kind
+    assert set(guessed.ids) == {"ct-1", "ld-1"}

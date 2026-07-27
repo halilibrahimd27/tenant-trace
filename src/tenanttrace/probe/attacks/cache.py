@@ -71,7 +71,11 @@ class CacheAttack:
                 cold.facts(),
                 mode=AccessMode.OBJECT,
                 sent_ids=[identifier],
-                speculative_path=is_speculative_path(endpoint, ctx.tenant_path_params),
+                speculative_path=is_speculative_path(
+                    endpoint,
+                    ctx.tenant_path_params,
+                    matched_kind=ids.matched_kind,
+                ),
             )
             if cold_decision.leaked:
                 continue
@@ -91,7 +95,11 @@ class CacheAttack:
                 hot.facts(),
                 mode=AccessMode.OBJECT,
                 sent_ids=[identifier],
-                speculative_path=is_speculative_path(endpoint, ctx.tenant_path_params),
+                speculative_path=is_speculative_path(
+                    endpoint,
+                    ctx.tenant_path_params,
+                    matched_kind=ids.matched_kind,
+                ),
             )
 
             if not hot_decision.leaked:

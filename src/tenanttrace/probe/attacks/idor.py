@@ -71,7 +71,11 @@ class IdorAttack:
                     exchange.facts(),
                     mode=AccessMode.OBJECT,
                     sent_ids=[identifier],
-                    speculative_path=is_speculative_path(endpoint, ctx.tenant_path_params),
+                    speculative_path=is_speculative_path(
+                        endpoint,
+                        ctx.tenant_path_params,
+                        matched_kind=ids.matched_kind,
+                    ),
                 )
 
                 # Before calling this a tenant-scoping failure, check whether
