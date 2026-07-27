@@ -383,3 +383,43 @@ def test_the_dry_run_estimate_counts_requests_not_endpoint_pairs() -> None:
     assert "≈" in summary
     total = int(summary.split("≈")[1].split()[0])
     assert total >= (3 + 3) * 2 + 1 * 2
+
+
+# --------------------------------------------------------------------------- #
+# validate-config: the first thirty seconds
+# --------------------------------------------------------------------------- #
+
+
+def test_the_config_path_works_as_an_argument() -> None:
+    """Three agents typed this form before it was accepted. A tool whose own
+    quickstart line does not run is a bad first thirty seconds."""
+    result = runner.invoke(app, ["validate-config", "fixtures/tenanttrace.vulnerable.toml"])
+    assert result.exit_code == EXIT_OK, result.output
+    assert "is valid" in result.output
+
+
+def test_the_config_path_still_works_as_an_option() -> None:
+    result = runner.invoke(
+        app, ["validate-config", "--config", "fixtures/tenanttrace.vulnerable.toml"]
+    )
+    assert result.exit_code == EXIT_OK, result.output
+
+
+def test_it_shows_the_setting_a_tenant_in_path_run_depends_on() -> None:
+    result = runner.invoke(app, ["validate-config", "fixtures/tenanttrace.vulnerable.toml"])
+    assert "tenant path params" in result.output
+    assert "defaulting to" in result.output
+
+
+def test_a_spec_path_that_does_not_exist_is_a_warning_not_a_green_tick(tmp_path: Path) -> None:
+    """ "Valid" used to mean only "this file parses"; the failure surfaced much
+    later as an empty endpoint inventory."""
+    config = tmp_path / "t.toml"
+    config.write_text(
+        '[target]\nbase_url = "http://127.0.0.1:9999"\nallowed_hosts = ["127.0.0.1"]\n'
+        'spec = "openapi"\nspec_path = "does/not/exist.json"\n',
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["validate-config", str(config)])
+    assert "does not exist" in result.output
+    assert "[target]" in result.output

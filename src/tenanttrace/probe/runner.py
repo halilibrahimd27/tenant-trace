@@ -142,6 +142,14 @@ def run_probe(config: Config, options: ProbeOptions | None = None) -> ProbeOutco
 
     state = _RunState()
     client = build_client(config, transport=opts.transport)
+    # The seeder gets its own client, and the reason is a silent-invalidity
+    # bug rather than tidiness: a seeder that registers a user over an API
+    # which authenticates by cookie leaves that cookie in the shared jar, and
+    # the prober then attacks *already authenticated as the seeder's user*.
+    # Every request would carry an identity nobody configured, both tenant
+    # sessions would be the same principal, and the run would look ordinary.
+    # Found on Teable, which sets HttpOnly `auth_session` on signup.
+    seed_client = build_client(config, transport=opts.transport)
     limiter = RateLimiter(config.probe.max_rps)
 
     sessions: dict[TenantLabel, TenantSession] = {}
@@ -175,7 +183,7 @@ def run_probe(config: Config, options: ProbeOptions | None = None) -> ProbeOutco
             )
             raise _Abort
 
-        seeder = opts.seeder or _resolve_seeder(config, client)
+        seeder = opts.seeder or _resolve_seeder(config, seed_client)
         if seeder is None:
             invalid_reason = (
                 "no seeder configured. TenantTrace cannot manufacture ground truth without "
@@ -335,6 +343,46 @@ def run_probe(config: Config, options: ProbeOptions | None = None) -> ProbeOutco
                 "and count as neither refused nor leaked"
             )
 
+        # Getting `kind` wrong errors nowhere: the run just degrades to trying
+        # a few ids blindly at every endpoint, losing both coverage and
+        # confidence, and looks entirely normal in the report. Say it out loud.
+        seeded_kinds = {record.kind for tenant in tenants.values() for record in tenant.records}
+        endpoint_kinds = {resource_name(endpoint) for endpoint in inventory.objects()} - {""}
+        if seeded_kinds and endpoint_kinds and not (seeded_kinds & endpoint_kinds):
+            state.errors.append(
+                "no seeded record kind matches any endpoint's resource, so every object "
+                "endpoint was probed with blindly chosen ids. Seeded "
+                f"{sorted(seeded_kinds)}; the API's resources are "
+                f"{sorted(endpoint_kinds)[:8]}. See SeederAdapter.seed_records."
+            )
+
+        # ---- CONTROLS, AGAIN ---------------------------------------------
+        # The controls passing at the start proves the credential worked then.
+        # A long audit outlives short-lived tokens — Baserow's live 600
+        # seconds, and a run that exceeds that spends its second half being
+        # refused for the wrong reason while reporting "refused" as evidence of
+        # isolation. Re-asserting at the end costs two requests and turns that
+        # from an invisible false-clean into an INVALID run.
+        for label in (TenantLabel.A, TenantLabel.B):
+            closing = _self_access_control(
+                sessions[label],
+                tenants[label],
+                inventory,
+                set(),  # nothing to spend: the attacks are already over
+                config.tenancy.columns(),
+                config.tenancy.tenant_path_params(),
+            )
+            closing = closing.model_copy(update={"name": f"{closing.name}:closing"})
+            state.controls.append(closing)
+            if not closing.passed:
+                invalid_reason = (
+                    f"tenant {label.value} could no longer read its own data when the run "
+                    "finished, although it could at the start. The credential expired or "
+                    "was revoked mid-run, so the attempts after that point were refused "
+                    "for the wrong reason and are not evidence of isolation."
+                )
+                raise _Abort
+
         # A 404 from an endpoint that serves nothing is not a refusal. Done
         # here, after every attack, so the reads it makes cannot warm a cache
         # that a later attack depends on being cold (ADR-0008).
@@ -361,6 +409,7 @@ def run_probe(config: Config, options: ProbeOptions | None = None) -> ProbeOutco
                         f"cleanup for tenant {label.value} failed: {type(exc).__name__}: {exc}"
                     )
         client.close()
+        seed_client.close()
 
     if invalid_reason is not None:
         report = _invalid_report(config, started, state, reason=invalid_reason)

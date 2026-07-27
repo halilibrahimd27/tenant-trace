@@ -60,7 +60,23 @@ def safe_report(safe_config: Config, safe_transport: SyncASGITransport):  # type
 def test_run_is_valid_and_controls_pass(vulnerable_report) -> None:  # type: ignore[no-untyped-def]
     assert vulnerable_report.status is RunStatus.VALID
     assert vulnerable_report.controls_passed
-    assert len(vulnerable_report.controls) == 2
+    # Two tenants, asserted at both ends of the run.
+    assert len(vulnerable_report.controls) == 4
+
+
+def test_the_controls_are_re_asserted_when_the_run_finishes(  # type: ignore[no-untyped-def]
+    vulnerable_report,
+) -> None:
+    """A long audit outlives short-lived tokens.
+
+    The controls passing at the start prove the credential worked then. Some
+    live 600 seconds; a run that exceeds that spends its second half being
+    refused for the wrong reason while reporting "refused" as evidence of
+    isolation.
+    """
+    closing = [c for c in vulnerable_report.controls if c.name.endswith(":closing")]
+    assert len(closing) == 2
+    assert all(c.passed for c in closing)
 
 
 @pytest.mark.parametrize(
@@ -386,3 +402,21 @@ def test_no_attack_reports_an_endpoint_it_never_reached(safe_report) -> None:  #
     for attack in safe_report.attacks_run:
         touched = [r for r in safe_report.results if r.attack is attack]
         assert touched, f"{attack.value} ran and emitted nothing at all"
+
+
+def test_the_seeder_does_not_share_a_cookie_jar_with_the_prober(  # type: ignore[no-untyped-def]
+    vulnerable_config, vulnerable_transport
+) -> None:
+    """A seeder that registers over a cookie-authenticating API leaves that
+    cookie in the shared jar, and the prober then attacks already
+    authenticated as the seeder's user — an identity nobody configured, in a
+    run that looks entirely ordinary. Found on Teable, which sets HttpOnly
+    `auth_session` on signup."""
+    import inspect
+
+    from tenanttrace.probe import runner as runner_module
+
+    source = inspect.getsource(runner_module.run_probe)
+    assert "seed_client = build_client(" in source
+    assert "_resolve_seeder(config, seed_client)" in source
+    assert "seed_client.close()" in source

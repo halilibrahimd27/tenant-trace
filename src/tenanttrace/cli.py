@@ -795,8 +795,24 @@ class MySeeder:
 
 
 @app.command("validate-config")
-def validate_config(config_path: ConfigOption = Path("tenanttrace.toml")) -> None:
-    """Parse a config file and report exactly what it will do."""
+def validate_config(
+    config_path: Annotated[
+        Path,
+        typer.Argument(help="Path to tenanttrace.toml"),
+    ] = Path("tenanttrace.toml"),
+    config_option: Annotated[
+        Path | None,
+        typer.Option("--config", "-c", help="Same thing, for symmetry with `probe`"),
+    ] = None,
+) -> None:
+    """Parse a config file and report exactly what it will do.
+
+    The path is positional here and an option on ``probe``, and three people
+    typed the positional form at this command before it accepted one. A tool
+    whose own quickstart line does not run is a bad first thirty seconds, so
+    both spellings work.
+    """
+    config_path = config_option or config_path
     config = _load(config_path)
     console.print(f"[green]{config_path} is valid.[/]\n")
     table = Table(show_header=False, box=None)
@@ -806,6 +822,15 @@ def validate_config(config_path: ConfigOption = Path("tenanttrace.toml")) -> Non
     table.add_row("spec", f"{config.target.spec} @ {config.target.spec_path or '(default)'}")
     table.add_row("seeder", config.seeder.adapter or "(none — required for probing)")
     table.add_row("tenant column", config.tenancy.column)
+    # The setting that decides whether a tenant-in-path API is probed at all,
+    # and it was the one thing this table did not show.
+    if config.tenancy.path_params:
+        table.add_row("tenant path params", ", ".join(config.tenancy.path_params))
+    else:
+        table.add_row(
+            "tenant path params",
+            "(defaulting to " + ", ".join(config.tenancy.columns()) + ")",
+        )
     table.add_row("scoping mode", config.tenancy.scoping_mode)
     table.add_row("attacks", ", ".join(a.value for a in config.probe.attacks))
     mutation = "yes (still needs --allow-mutation)" if config.probe.allow_mutation else "no"
@@ -813,6 +838,20 @@ def validate_config(config_path: ConfigOption = Path("tenanttrace.toml")) -> Non
     table.add_row("allowlist", ", ".join(config.tenancy.cross_tenant_allowlist) or "(none)")
     table.add_row("fail_on", config.report.fail_on)
     console.print(table)
+
+    # "is valid" used to mean only "this file parses". A spec_path pointing at
+    # nothing still printed a green tick, and the failure surfaced much later
+    # as an empty endpoint inventory.
+    spec_path = str(config.target.spec_path or "")
+    is_url = spec_path.startswith(("http://", "https://"))
+    local_and_missing = bool(spec_path) and not is_url and not Path(spec_path).exists()
+    if local_and_missing:
+        err.print(
+            "\n[bold yellow]warning[/] — "
+            + escape("[target]")
+            + f" spec_path {spec_path!r} does not exist. The run will find no "
+            "endpoints and report nothing."
+        )
 
 
 @app.command()

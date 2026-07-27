@@ -50,10 +50,17 @@ class SeederAdapter(Protocol):
     def create_tenant(self, label: str) -> Mapping[str, Any]:
         """Create a fresh tenant and return whatever identifies it downstream.
 
-        The returned mapping is opaque to TenantTrace with one exception: a
-        ``tenant_id`` key, if present, is used as the tenant's identity in
-        findings and in the parameter-override attack. Include it when your
-        application exposes one.
+        The returned mapping is opaque to TenantTrace with one exception:
+        **``tenant_id`` must be the tenant's identity as it appears in a URL
+        path.** The prober substitutes it into tenant path parameters, so for
+        an API shaped ``/api/v1/accounts/{account_id}/…`` it is the account id;
+        for ``/api/content/{app}/…`` the app *name*; for
+        ``/admin/realms/{realm}/…`` the realm name. Getting it wrong means the
+        canonical cross-tenant test is never run.
+
+        Declare a ``canary`` keyword argument to receive the tenant's canary
+        here as well — useful when the tenant's own name is the only writable
+        free text your application has.
         """
         ...
 
@@ -72,6 +79,15 @@ class SeederAdapter(Protocol):
         and ``id`` keys (or a :class:`~tenanttrace.core.models.SeededRecord`);
         anything with an ``id`` is accepted and its kind inferred, because the
         common case is returning your API's own JSON straight back.
+
+        **``kind`` decides which endpoints an id is tried against**, and it has
+        one rule: it must equal the resource segment of the endpoint path,
+        lowercase and singular. ``/api/v1/accounts/{account_id}/contacts/{id}``
+        wants ``kind="contact"``; ``/admin/realms/{realm}/users/{user-id}``
+        wants ``kind="user"``. Get it wrong and nothing errors — the run
+        silently degrades to trying a few ids blindly at every endpoint, which
+        costs both coverage and confidence. The run warns when no kind matched
+        anything.
         """
         ...
 
@@ -197,11 +213,17 @@ def seed_tenant(
     """
     canary = make_canary(label)
     try:
-        # Typed as Any deliberately: the Protocol says this returns a mapping,
-        # but a seeder is user code that was never type-checked against it, and
-        # the resulting error message should name the problem rather than
-        # surface three frames later as an AttributeError.
-        tenant: Any = seeder.create_tenant(label.value)
+        # The canary is offered to create_tenant as well, using the same
+        # signature filtering as the constructor. Some applications name the
+        # tenant itself at creation time and expose nothing else writable —
+        # minting the canary only afterwards left those unable to carry one.
+        # Typed as Any because the Protocol declares the narrower signature;
+        # the keyword is opt-in and discovered from the seeder's own signature.
+        create: Any = seeder.create_tenant
+        if "canary" in _accepted_kwargs(create):
+            tenant: Any = create(label.value, canary=canary)
+        else:
+            tenant = create(label.value)
     except Exception as exc:  # noqa: BLE001 - user code, any failure is ours to report
         msg = f"seeder.create_tenant({label.value!r}) failed: {type(exc).__name__}: {exc}"
         raise SeederError(msg) from exc
