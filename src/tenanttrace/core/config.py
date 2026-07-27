@@ -190,6 +190,11 @@ class SeederConfig(_Section):
         return value
 
 
+def _normalise_param(name: str) -> str:
+    """`accountId`, `account-id`, `account_id` are one name."""
+    return "".join(ch for ch in name.lower() if ch.isalnum())
+
+
 class TenancyConfig(_Section):
     """What "tenant" means in this application's vocabulary."""
 
@@ -198,6 +203,11 @@ class TenancyConfig(_Section):
     scoping_mode: Literal["auto", "manual", "global"] = "auto"
     scoped_models: tuple[str, ...] = ()
     cross_tenant_allowlist: tuple[str, ...] = ()
+    # Path parameters that select the tenant rather than an object:
+    # /api/v1/accounts/{account_id}/conversations/{id}. Defaults to the tenant
+    # columns, which covers the *_id spellings; set it explicitly for APIs that
+    # name the segment something else — Squidex uses {app}, Keycloak {realm}.
+    path_params: tuple[str, ...] = ()
 
     @property
     def mode(self) -> ScopingMode:
@@ -212,6 +222,17 @@ class TenancyConfig(_Section):
         """The configured column first, then the other candidates."""
         rest = tuple(c for c in self.candidate_columns if c != self.column)
         return (self.column, *rest)
+
+    def tenant_path_params(self) -> frozenset[str]:
+        """Path parameter names that name a tenant, normalised for matching.
+
+        Without this the prober substitutes one object id into *every* slot, so
+        ``/api/v1/accounts/{account_id}/conversations/{id}`` becomes a URL that
+        addresses nothing — and the canonical BOLA shape, where the tenant is
+        in the path and the attack is to swap that one segment, goes untested.
+        """
+        names = self.path_params or self.columns()
+        return frozenset(_normalise_param(n) for n in names)
 
 
 class ProbeConfig(_Section):

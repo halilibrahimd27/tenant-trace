@@ -13,7 +13,7 @@ from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
-from tenanttrace.core.config import Config
+from tenanttrace.core.config import Config, _normalise_param
 from tenanttrace.core.models import (
     AttackName,
     Endpoint,
@@ -58,6 +58,11 @@ class AttackContext:
     # and attack reads on different records is what lets the cache attack own
     # that finding, with the right remediation attached.
     excluded_ids: frozenset[str] = frozenset()
+
+    @property
+    def tenant_path_params(self) -> frozenset[str]:
+        """Path parameter names that select a tenant, from the config."""
+        return self.config.tenancy.tenant_path_params()
 
     def is_allowlisted(self, endpoint: Endpoint) -> bool:
         """True when this endpoint is meant to cross tenants.
@@ -132,25 +137,50 @@ def candidate_ids(
     return of_kind[:MAX_BLIND_IDS] or tenant.record_ids()[:MAX_BLIND_IDS]
 
 
-def build_path(endpoint: Endpoint, identifier: str) -> str:
-    """Substitute one identifier into every path parameter of an endpoint.
+def build_path(
+    endpoint: Endpoint,
+    identifier: str,
+    *,
+    tenant: TenantContext | None = None,
+    tenant_params: frozenset[str] = frozenset(),
+) -> str:
+    """Fill an endpoint's path parameters for a cross-tenant request.
 
-    Multi-parameter paths (``/api/tenants/{tenant_id}/invoices/{invoice_id}``)
-    get the same value everywhere, which is wrong often enough to matter. Pass
-    :func:`is_speculative_path` to the oracle alongside the response so a 404
-    caused by our own guess is not read as the application refusing us.
+    Two kinds of slot, and conflating them was a real gap. A slot that names a
+    *tenant* — ``{account_id}``, ``{app}``, ``{realm}`` — takes the victim
+    tenant's own selector, because swapping exactly that segment while keeping
+    the caller's credential is the canonical BOLA test. Every other slot takes
+    the object identifier.
+
+    Before this, one id went into every slot, so
+    ``/api/v1/accounts/{account_id}/conversations/{id}`` became
+    ``/api/v1/accounts/7/conversations/7`` — a URL addressing nothing, whose
+    404 said nothing about isolation. Three of the six applications this tool
+    has been pointed at carry the tenant in the path.
     """
-    return substitute_path(endpoint.path, dict.fromkeys(endpoint.path_params, identifier))
+    values: dict[str, str] = {}
+    for param in endpoint.path_params:
+        if tenant is not None and _normalise_param(param) in tenant_params:
+            values[param] = tenant.tenant_id
+        else:
+            values[param] = identifier
+    return substitute_path(endpoint.path, values)
 
 
-def is_speculative_path(endpoint: Endpoint) -> bool:
+def object_params(endpoint: Endpoint, tenant_params: frozenset[str] = frozenset()) -> int:
+    """How many slots had to be filled with an object id we only guessed at."""
+    return sum(1 for p in endpoint.path_params if _normalise_param(p) not in tenant_params)
+
+
+def is_speculative_path(endpoint: Endpoint, tenant_params: frozenset[str] = frozenset()) -> bool:
     """Did :func:`build_path` have to invent part of this URL?
 
-    One parameter, one seeded id: the URL is exactly what we meant. Two or
-    more and the same id goes into every slot, so the path very likely
-    addresses no record at all — and its 404 says nothing about isolation.
+    One object slot, one seeded id: the URL is exactly what we meant. Two or
+    more object slots and the same id goes into each, so the path very likely
+    addresses no record at all — and its 404 says nothing about isolation. A
+    tenant slot never counts, because that one is filled with a real value.
     """
-    return len(endpoint.path_params) > 1
+    return object_params(endpoint, tenant_params) > 1
 
 
 def skipped(

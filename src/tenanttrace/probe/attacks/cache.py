@@ -58,7 +58,12 @@ class CacheAttack:
             if not ids:
                 continue
             identifier = ids[0]
-            path = build_path(endpoint, identifier)
+            path = build_path(
+                endpoint,
+                identifier,
+                tenant=ctx.victim_ctx,
+                tenant_params=ctx.tenant_path_params,
+            )
 
             # Step 1 — cold. A leak here is an IDOR, not a cache bug.
             cold = ctx.actor.request(endpoint.method, path, attack=self.name.value)
@@ -66,7 +71,7 @@ class CacheAttack:
                 cold.facts(),
                 mode=AccessMode.OBJECT,
                 sent_ids=[identifier],
-                speculative_path=is_speculative_path(endpoint),
+                speculative_path=is_speculative_path(endpoint, ctx.tenant_path_params),
             )
             if cold_decision.leaked:
                 continue
@@ -86,7 +91,7 @@ class CacheAttack:
                 hot.facts(),
                 mode=AccessMode.OBJECT,
                 sent_ids=[identifier],
-                speculative_path=is_speculative_path(endpoint),
+                speculative_path=is_speculative_path(endpoint, ctx.tenant_path_params),
             )
 
             if not hot_decision.leaked:

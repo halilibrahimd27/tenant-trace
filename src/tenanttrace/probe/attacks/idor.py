@@ -59,13 +59,18 @@ class IdorAttack:
                 continue
 
             for identifier in ids:
-                path = build_path(endpoint, identifier)
+                path = build_path(
+                    endpoint,
+                    identifier,
+                    tenant=ctx.victim_ctx,
+                    tenant_params=ctx.tenant_path_params,
+                )
                 exchange = ctx.actor.request(endpoint.method, path, attack=self.name.value)
                 decision = ctx.oracle.judge(
                     exchange.facts(),
                     mode=AccessMode.OBJECT,
                     sent_ids=[identifier],
-                    speculative_path=is_speculative_path(endpoint),
+                    speculative_path=is_speculative_path(endpoint, ctx.tenant_path_params),
                 )
 
                 evidence = exchange.evidence().model_copy(
