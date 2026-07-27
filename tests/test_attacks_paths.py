@@ -79,3 +79,35 @@ def test_two_object_slots_are_still_speculative() -> None:
 
 def test_a_single_object_slot_is_exact() -> None:
     assert not is_speculative_path(endpoint("/api/invoices/{id}", "id"), DEFAULTS)
+
+
+# --------------------------------------------------------------------------- #
+# A result may overrule the category its attack would have assigned
+# --------------------------------------------------------------------------- #
+
+
+def test_a_result_defaults_to_its_attack_category() -> None:
+    from tenanttrace.core.models import AttackName, Category, ProbeResult, TenantLabel, Verdict
+
+    result = ProbeResult(
+        attack=AttackName.IDOR,
+        endpoint=endpoint("/api/x/{id}", "id"),
+        actor=TenantLabel.A,
+        target=TenantLabel.B,
+        verdict=Verdict.LEAKED,
+    )
+    assert result.category_of() is Category.CROSS_TENANT_READ
+
+
+def test_an_attack_that_establishes_a_differential_can_overrule_itself() -> None:
+    from tenanttrace.core.models import AttackName, Category, ProbeResult, TenantLabel, Verdict
+
+    result = ProbeResult(
+        attack=AttackName.IDOR,
+        endpoint=endpoint("/api/x/{id}", "id"),
+        actor=TenantLabel.A,
+        target=TenantLabel.B,
+        verdict=Verdict.LEAKED,
+        category=Category.PUBLIC_ENDPOINT,
+    )
+    assert result.category_of() is Category.PUBLIC_ENDPOINT

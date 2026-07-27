@@ -24,7 +24,6 @@ from pathlib import Path
 from typing import Any
 
 from tenanttrace.core.models import (
-    ATTACK_CATEGORIES,
     CANARY_RE,
     Confidence,
     ControlResult,
@@ -996,7 +995,7 @@ def _html_graph(report: RunReport) -> list[str]:
     edges: dict[tuple[str, str], Severity] = {}
     for result in leaked:
         key = (result.actor.value, result.endpoint.key)
-        severity = severity_for(ATTACK_CATEGORIES[result.attack])
+        severity = severity_for(result.category_of())
         if key not in edges or severity.rank > edges[key].rank:
             edges[key] = severity
 

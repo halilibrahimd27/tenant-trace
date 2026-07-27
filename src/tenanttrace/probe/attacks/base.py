@@ -17,11 +17,12 @@ from tenanttrace.core.config import Config, _normalise_param
 from tenanttrace.core.models import (
     AttackName,
     Endpoint,
+    HttpMethod,
     ProbeResult,
     TenantContext,
     Verdict,
 )
-from tenanttrace.probe.oracle import TenantOracle
+from tenanttrace.probe.oracle import AccessMode, TenantOracle
 from tenanttrace.probe.session import TenantSession
 from tenanttrace.probe.spec import EndpointInventory, substitute_path
 
@@ -45,6 +46,10 @@ class AttackContext:
     actor_ctx: TenantContext
     victim_ctx: TenantContext
     oracle: TenantOracle
+    # A session carrying no credential at all. Used to tell "tenant A can read
+    # tenant B's record" from "anybody can read tenant B's record" — two
+    # different bugs whose fixes have nothing in common (ADR-0011).
+    anonymous: TenantSession | None = None
     allow_mutation: bool = False
     # Record ids their own tenant already read during the positive controls.
     #
@@ -209,6 +214,37 @@ def skipped(
 
 
 ALLOWLISTED = "excluded by [tenancy] cross_tenant_allowlist, so it was not attacked"
+
+
+def serves_anyone(
+    ctx: AttackContext,
+    method: HttpMethod,
+    path: str,
+    *,
+    attack: str,
+    sent_ids: Sequence[str] = (),
+) -> bool:
+    """Would a request carrying no credential get the same data?
+
+    A leak proved with tenant A's token says isolation failed. The same leak
+    reproduced with *no* token says something different and more basic: the
+    route is public, and tenant scoping is not the control that broke. The two
+    need unrelated fixes, so the attack asks before it names the category.
+
+    Found on a real target — Squidex serves asset content from an unscoped
+    ``/api/assets/{id}``, and the report told the reader to add a tenant
+    predicate to a query that has no caller to scope to.
+
+    Errs towards *not* reclaiming the finding: if the anonymous request fails
+    to go out at all, the answer is False and the original cross-tenant
+    category stands.
+    """
+    if ctx.anonymous is None:
+        return False
+    probe = ctx.anonymous.request(method, path, attack=attack)
+    if probe.transport_error is not None:
+        return False
+    return ctx.oracle.judge(probe.facts(), mode=AccessMode.OBJECT, sent_ids=sent_ids).leaked
 
 
 def result_from(

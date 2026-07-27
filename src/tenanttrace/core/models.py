@@ -170,6 +170,7 @@ class Category(enum.StrEnum):
     AGGREGATE_LEAK = "aggregate_leak"
     PARAM_OVERRIDE = "param_override"
     CACHE_KEY_LEAK = "cache_key_leak"
+    PUBLIC_ENDPOINT = "public_endpoint"
     # --- static: hypotheses ----------------------------------------------
     MISSING_TENANT_FILTER = "missing_tenant_filter"
     RAW_SQL_ESCAPE = "raw_sql_escape"
@@ -423,10 +424,19 @@ class ProbeResult(_Frozen):
     verdict: Verdict
     evidence: Evidence = Field(default_factory=Evidence)
     detail: str = ""
+    # Normally the attack decides the category. An attack that establishes a
+    # differential can overrule itself: an endpoint that serves the same data
+    # to nobody at all is a missing-authentication problem, not a tenant-
+    # scoping one, and the two need different fixes (ADR-0008, ADR-0011).
+    category: Category | None = None
 
     @property
     def leaked(self) -> bool:
         return self.verdict is Verdict.LEAKED
+
+    def category_of(self) -> Category:
+        """The category to report, honouring an attack's own correction."""
+        return self.category or ATTACK_CATEGORIES[self.attack]
 
 
 class ControlResult(_Frozen):

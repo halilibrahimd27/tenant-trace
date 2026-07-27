@@ -312,3 +312,27 @@ def test_an_allowlisted_endpoint_is_never_counted_as_refused(safe_report) -> Non
 def test_allowlisted_endpoints_produce_no_findings(safe_report) -> None:  # type: ignore[no-untyped-def]
     """Recording the skip must not turn into reporting it as a problem."""
     assert not [f for f in safe_report.findings if "/api/admin" in f.location]
+
+
+def test_a_public_route_is_not_reported_as_a_scoping_failure(  # type: ignore[no-untyped-def]
+    vulnerable_config, vulnerable_transport
+) -> None:
+    """Two different bugs; the remediation for one is useless for the other.
+
+    Found on Squidex, which serves asset content from an unscoped
+    /api/assets/{id}. The report called it a cross-tenant read and told the
+    reader to add a tenant predicate to a query that has no caller to scope to.
+    """
+    report = _audit(vulnerable_config, vulnerable_transport)
+    for finding in report.findings:
+        if finding.category is Category.PUBLIC_ENDPOINT:
+            assert "no credential" in finding.evidence.note or ""
+            assert "CWE-306" in finding.tags
+
+
+def test_the_anonymous_check_costs_nothing_on_a_clean_run(  # type: ignore[no-untyped-def]
+    safe_config, safe_transport
+) -> None:
+    """It is only asked when there is a leak to explain."""
+    report = _audit(safe_config, safe_transport)
+    assert not [f for f in report.findings if f.category is Category.PUBLIC_ENDPOINT]

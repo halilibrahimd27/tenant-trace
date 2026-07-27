@@ -75,6 +75,32 @@ CATEGORY_RULES: dict[Category, CategoryRule] = {
             "so the response does not confirm that the id exists."
         ),
     ),
+    Category.PUBLIC_ENDPOINT: CategoryRule(
+        severity=Severity.HIGH,
+        cwe=("CWE-306", "CWE-200"),
+        owasp_api="OWASP-API1:2023",
+        asvs="ASVS-V4.1.1",
+        title=Template("Unauthenticated access to tenant data at $location"),
+        remediation=Template(
+            "`$location` returned another tenant's record — and returned the "
+            "same record to a request carrying **no credential at all**. So "
+            "this is not a tenant-scoping bug: the route is public, and tenant "
+            "isolation is not the control that failed.\n\n"
+            "That distinction decides the fix. Adding a tenant predicate to "
+            "the query changes nothing, because there is no caller to scope "
+            "to. Either put the route behind authentication, or — if serving "
+            "this content publicly is deliberate, as it often is for assets "
+            "and CDN paths — say so explicitly:\n\n"
+            "```toml\n"
+            "[tenancy]\n"
+            'cross_tenant_allowlist = ["$location_path"]\n'
+            "```\n\n"
+            "Allowlisting is recorded in the report rather than hidden, so a "
+            "reviewer can see the decision was made rather than missed. Note "
+            "that unguessable ids are not access control: if the identifier "
+            "reaches a browser, a log, or a referrer header, it is public."
+        ),
+    ),
     Category.CROSS_TENANT_WRITE: CategoryRule(
         severity=Severity.CRITICAL,
         cwe=("CWE-639", "CWE-915"),

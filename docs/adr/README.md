@@ -15,5 +15,6 @@ acceptance — superseded records get a new ADR that points back.
 | [0008](0008-differential-attribution.md) | Attacks establish a baseline before claiming a finding | accepted |
 | [0009](0009-access-graph-from-proven-results.md) | The access graph is drawn from proven results, not from a model | accepted |
 | [0010](0010-what-counts-as-evidence-of-isolation.md) | A result is evidence of isolation only if the application decided | accepted |
+| [0011](0011-public-endpoints-are-a-different-bug.md) | An endpoint that serves everyone is not an endpoint that mis-scopes | accepted |
 
 Copy [`template.md`](template.md) to start a new one.

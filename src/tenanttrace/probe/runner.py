@@ -31,7 +31,6 @@ from tenanttrace import __version__
 from tenanttrace.core.config import Config
 from tenanttrace.core.fingerprint import with_fingerprint
 from tenanttrace.core.models import (
-    ATTACK_CATEGORIES,
     THROTTLE_STATUSES,
     AttackName,
     Category,
@@ -176,6 +175,17 @@ def run_probe(config: Config, options: ProbeOptions | None = None) -> ProbeOutco
             for label in (TenantLabel.A, TenantLabel.B)
         }
 
+        # The same client and rate limiter, carrying no credential. Labelled A
+        # only because TenantLabel has no "nobody" — nothing reads the label,
+        # and it never appears in a finding.
+        anonymous = TenantSession(
+            label=TenantLabel.A,
+            client=client,
+            headers={},
+            limiter=limiter,
+            redact=opts.redact,
+        )
+
         # ---- POSITIVE CONTROLS -------------------------------------------
         control_ids: set[str] = set()
         for label in (TenantLabel.A, TenantLabel.B):
@@ -229,6 +239,7 @@ def run_probe(config: Config, options: ProbeOptions | None = None) -> ProbeOutco
                     victim=tenants[victim_label],
                     tenant_columns=config.tenancy.columns(),
                 ),
+                anonymous=anonymous,
                 allow_mutation=opts.allow_mutation and config.probe.allow_mutation,
                 excluded_ids=frozenset(control_ids),
             )
@@ -449,7 +460,7 @@ def _findings_from(results: Sequence[ProbeResult], config: Config) -> list[Findi
         if result.verdict is not Verdict.LEAKED:
             continue
 
-        category = ATTACK_CATEGORIES[result.attack]
+        category = result.category_of()
         location = result.endpoint.key
         finding = with_fingerprint(
             Finding(

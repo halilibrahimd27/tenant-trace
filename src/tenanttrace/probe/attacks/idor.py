@@ -15,13 +15,14 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
-from tenanttrace.core.models import AttackName, ProbeResult, Verdict
+from tenanttrace.core.models import AttackName, Category, ProbeResult, Verdict
 from tenanttrace.probe.attacks.base import (
     ALLOWLISTED,
     AttackContext,
     build_path,
     candidate_ids,
     is_speculative_path,
+    serves_anyone,
     skipped,
 )
 from tenanttrace.probe.oracle import AccessMode
@@ -73,6 +74,25 @@ class IdorAttack:
                     speculative_path=is_speculative_path(endpoint, ctx.tenant_path_params),
                 )
 
+                # Before calling this a tenant-scoping failure, check whether
+                # the route is simply public. Only asked when there is a leak
+                # to explain, so a clean run costs no extra requests.
+                category = None
+                detail = decision.reason
+                if decision.leaked and serves_anyone(
+                    ctx,
+                    endpoint.method,
+                    path,
+                    attack=self.name.value,
+                    sent_ids=[identifier],
+                ):
+                    category = Category.PUBLIC_ENDPOINT
+                    detail = (
+                        f"{decision.reason}; the same record came back to a request "
+                        "carrying no credential at all, so the route is public rather "
+                        "than mis-scoped"
+                    )
+
                 evidence = exchange.evidence().model_copy(
                     update={
                         "matched_canary": decision.matched_canary,
@@ -86,7 +106,8 @@ class IdorAttack:
                     target=ctx.victim_ctx.label,
                     verdict=decision.verdict,
                     evidence=evidence,
-                    detail=decision.reason,
+                    detail=detail,
+                    category=category,
                 )
 
                 # One proven leak per endpoint is enough. Continuing would add
