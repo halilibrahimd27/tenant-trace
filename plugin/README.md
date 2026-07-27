@@ -23,7 +23,20 @@ claude plugin install tenant-trace@<marketplace>
 claude plugin install ./plugin
 ```
 
-The hook needs the `tenanttrace` CLI. It looks for it on `PATH`, then in the
-project's `.venv`/`venv`, then falls back to `uv run` when the project has a
-`pyproject.toml`. If it finds none of those it exits silently rather than
-filling an editing session with errors from a tool that is not installed.
+The hook needs the `tenanttrace` CLI:
+
+```bash
+uv tool install git+https://github.com/halilibrahimd27/tenant-trace
+```
+
+It looks on `PATH`, then in the project's `.venv`/`venv`, then falls back to
+`uv run` when the project has a `pyproject.toml`. It deliberately does not
+fetch anything itself — starting a download because somebody saved a file is a
+surprise, and a first run that takes thirty seconds on a keystroke is worse
+than a hook that asks to be installed.
+
+**If it cannot find the CLI it says so, once per session, and then goes quiet.**
+That matters more than it sounds: a hook that is silent because the tool is
+missing looks exactly like a hook that found no problems, and the second
+reading is the dangerous one. The same applies when the CLI is present but a
+scan fails — reported once, with the actual error.
