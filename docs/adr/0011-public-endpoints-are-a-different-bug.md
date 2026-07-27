@@ -12,6 +12,10 @@ GET /api/assets/81c65434-9b89-4b12-8585-6ded074efb33
 → 200   tt-canary-B-…3c242e14 asset 0
 ```
 
+(The canary is shortened here for the same reason the report shortens it: a
+seeded value is not something to publish, even from an instance that no longer
+exists.)
+
 Tenant A, holding its own credential, read tenant B's asset. By the oracle's
 rules that is a proven cross-tenant read, and the finding was true. The
 remediation attached to it was not:
