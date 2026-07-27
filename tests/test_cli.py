@@ -6,6 +6,7 @@ whose positive controls failed must not be able to report a green build.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -423,3 +424,90 @@ def test_a_spec_path_that_does_not_exist_is_a_warning_not_a_green_tick(tmp_path:
     result = runner.invoke(app, ["validate-config", str(config)])
     assert "does not exist" in result.output
     assert "[target]" in result.output
+
+
+def test_diff_refuses_to_compare_against_a_run_that_did_not_happen(tmp_path: Path) -> None:
+    """Comparing against an INVALID run is how a regression gets explained away."""
+    good = tmp_path / "good"
+    good.mkdir()
+    (good / "report.json").write_text(
+        json.dumps(
+            {
+                "tool_version": "0.1.0",
+                "status": "valid",
+                "started_at": "2026-01-01T00:00:00+00:00",
+                "target": "http://app.test",
+                "results": [],
+                "findings": [],
+                "controls": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    bad = tmp_path / "b"
+    bad.mkdir()
+    (bad / "report.json").write_text(
+        json.dumps(
+            {
+                "tool_version": "0.1.0",
+                "status": "invalid",
+                "started_at": "2026-01-01T00:00:00+00:00",
+                "target": "http://app.test",
+                "results": [],
+                "findings": [],
+                "controls": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["diff", str(bad), str(good)])
+    assert result.exit_code == EXIT_INVALID
+    assert "NOT COMPARABLE" in result.output
+
+
+def test_diff_can_gate_a_build_on_coverage_alone(tmp_path: Path) -> None:
+    """No new findings, less coverage: both runs look clean everywhere else."""
+    import json as _json
+
+    base = {
+        "tool_version": "0.1.0",
+        "status": "valid",
+        "started_at": "2026-01-01T00:00:00+00:00",
+        "target": "http://app.test",
+        "findings": [],
+        "controls": [],
+    }
+
+    def write(name: str, endpoints: list[str]) -> Path:
+        directory = tmp_path / name
+        directory.mkdir()
+        (directory / "report.json").write_text(
+            _json.dumps(
+                {
+                    **base,
+                    "results": [
+                        {
+                            "attack": "idor",
+                            "endpoint": {"method": "GET", "path": path, "path_params": []},
+                            "actor": "A",
+                            "target": "B",
+                            "verdict": "enforced",
+                            "detail": "refused",
+                        }
+                        for path in endpoints
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return directory
+
+    before = write("before", ["/a", "/b", "/c"])
+    after = write("after", ["/a"])
+
+    quiet = runner.invoke(app, ["diff", str(before), str(after)])
+    assert quiet.exit_code == EXIT_OK
+    assert "prove less than before" in quiet.output
+
+    gated = runner.invoke(app, ["diff", str(before), str(after), "--fail-on-regression"])
+    assert gated.exit_code == EXIT_FINDINGS

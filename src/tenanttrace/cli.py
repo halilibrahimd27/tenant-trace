@@ -855,6 +855,94 @@ def validate_config(
 
 
 @app.command()
+def diff(
+    before: Annotated[Path, typer.Argument(help="The earlier run: a run directory or report.json")],
+    after: Annotated[Path, typer.Argument(help="The later run")],
+    fail_on_regression: Annotated[
+        bool,
+        typer.Option(
+            "--fail-on-regression",
+            help="Exit non-zero when this run proves less than the earlier one",
+        ),
+    ] = False,
+) -> None:
+    """Compare two runs: what stopped being proven.
+
+    Every other view answers "what did this run find?". A team running this
+    weekly needs the other question, and nothing answered it: an application
+    that still holds and an application the harness no longer reaches both
+    report no findings.
+    """
+    from tenanttrace.core.coverage import compare, rows, summarise
+
+    try:
+        earlier = _read_run(before)
+        later = _read_run(after)
+    except (OSError, ValueError) as exc:
+        err.print(f"[bold red]could not read a run[/]\n{escape(str(exc))}")
+        raise typer.Exit(EXIT_USAGE) from exc
+
+    result = compare(earlier, later)
+
+    for note in result.notes:
+        err.print(f"[bold yellow]![/] {escape(note)}")
+
+    if not result.comparable:
+        err.print(
+            "[bold white on red] NOT COMPARABLE [/] one of these runs did not happen, so "
+            "the difference between them is not evidence of anything."
+        )
+        raise typer.Exit(EXIT_INVALID)
+
+    changed = rows(result)
+    if changed:
+        table = Table(title="Endpoints that prove less than before", header_style="bold")
+        table.add_column("endpoint", overflow="fold")
+        table.add_column("was")
+        table.add_column("now")
+        table.add_column("change")
+        for endpoint, was, now, detail in changed:
+            table.add_row(endpoint, was, f"[yellow]{now}[/]", detail)
+        console.print(table)
+
+    if result.new_findings:
+        _print_findings(list(result.new_findings), title="New findings")
+    if result.fixed_findings:
+        console.print(
+            f"[green]{count(len(result.fixed_findings), 'finding')} no longer reported[/]"
+        )
+    if result.gained:
+        console.print(f"[green]{count(len(result.gained), 'endpoint')} newly proven[/]")
+
+    line = summarise(result)
+    if result.regressed:
+        err.print(f"[bold yellow]{escape(line)}[/]")
+    else:
+        console.print(f"[green]{escape(line)}[/]")
+
+    if result.new_findings:
+        raise typer.Exit(EXIT_FINDINGS)
+    if result.regressed and fail_on_regression:
+        raise typer.Exit(EXIT_FINDINGS)
+
+
+def _read_run(path: Path) -> RunReport:
+    """Accept a run directory or the report.json inside it."""
+    from tenanttrace.core.report import read_report
+
+    if path.is_dir():
+        candidate = path / "report.json"
+        if not candidate.exists():
+            matches = sorted(path.glob("runs/*/report.json"))
+            if not matches:
+                msg = f"no report.json under {path}"
+                raise ValueError(msg)
+            candidate = matches[-1]
+        path = candidate
+    return read_report(path)
+
+
+@app.command()
 def version() -> None:
     """Print the version."""
     console.print(f"tenanttrace {__version__}")
