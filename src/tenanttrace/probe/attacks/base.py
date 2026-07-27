@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, overload
 
 from tenanttrace.core.config import Config, _normalise_param
 from tenanttrace.core.models import (
@@ -158,7 +158,13 @@ class Candidates:
     def __len__(self) -> int:
         return len(self.ids)
 
-    def __getitem__(self, index: int) -> str:
+    @overload
+    def __getitem__(self, index: int) -> str: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> tuple[str, ...]: ...
+
+    def __getitem__(self, index: int | slice) -> str | tuple[str, ...]:
         return self.ids[index]
 
 

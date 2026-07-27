@@ -226,13 +226,24 @@ def _normalise_key(key: str) -> str:
 
 
 def _iter_pairs(node: Any, *, depth: int = 0, max_depth: int = 64) -> Iterator[tuple[str, Any]]:
-    """Yield every ``(key, scalar value)`` pair in a decoded document."""
+    """Yield every ``(key, value)`` pair whose value can name an owner.
+
+    Scalars, and **each scalar inside a list**. Many-to-many ownership is an
+    ordinary shape — EspoCRM's real tenant column is ``teamsIds: ["<team id>"]``
+    — and skipping list values made the third oracle signal structurally dead
+    against it: that audit ran on canaries and ids alone without saying so.
+    """
     if depth > max_depth:
         return
     if isinstance(node, Mapping):
         for key, value in node.items():
-            if isinstance(key, str) and not isinstance(value, (Mapping, list, tuple)):
-                yield key, value
+            if isinstance(key, str):
+                if not isinstance(value, (Mapping, list, tuple)):
+                    yield key, value
+                elif isinstance(value, (list, tuple)):
+                    for item in value:
+                        if not isinstance(item, (Mapping, list, tuple)):
+                            yield key, item
             yield from _iter_pairs(value, depth=depth + 1, max_depth=max_depth)
     elif isinstance(node, (list, tuple)):
         for item in node:

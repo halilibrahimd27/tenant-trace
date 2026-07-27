@@ -364,3 +364,25 @@ def test_the_route_check_runs_after_every_attack(vulnerable_report) -> None:  # 
     """
     categories = {f.category for f in vulnerable_report.findings}
     assert Category.CACHE_KEY_LEAK in categories
+
+
+def test_cache_runs_before_anything_that_reads_as_the_owner() -> None:
+    """The ordering invariant, pinned as an invariant rather than a symptom.
+
+    Three separate changes have broken the cache attack by reading an object as
+    its owner first: a route-liveness check inside the attack loop, twice, and
+    extending the aggregate attack to object endpoints. Each time the failure
+    surfaced as a missing cache_key_leak, which is a slow way to learn it.
+    """
+    from tenanttrace.probe.runner import _ATTACK_ORDER
+
+    order = list(_ATTACK_ORDER)
+    assert order.index(AttackName.CACHE) < order.index(AttackName.AGGREGATE)
+    assert order.index(AttackName.CACHE) < order.index(AttackName.MASS_ASSIGN)
+
+
+def test_no_attack_reports_an_endpoint_it_never_reached(safe_report) -> None:  # type: ignore[no-untyped-def]
+    """Every attack that ran must account for every endpoint it looked at."""
+    for attack in safe_report.attacks_run:
+        touched = [r for r in safe_report.results if r.attack is attack]
+        assert touched, f"{attack.value} ran and emitted nothing at all"

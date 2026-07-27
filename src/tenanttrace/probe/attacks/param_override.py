@@ -77,6 +77,7 @@ class ParamOverrideAttack:
         # `?tenant_id=` is the highest-yield case — then the configured column
         # even when undeclared, because frameworks routinely bind query
         # parameters that no specification mentions.
+        refused = 0
         declared = [c for c in columns if c in endpoint.query_params]
         undeclared = [columns[0]] if columns and columns[0] not in declared else []
 
@@ -89,8 +90,12 @@ class ParamOverrideAttack:
             )
             decision = ctx.oracle.judge(exchange.facts(), mode=AccessMode.COLLECTION)
             if decision.verdict is Verdict.ENFORCED:
-                # Only the leak is interesting here; a rejected override on
-                # every possible parameter name would flood the transcript.
+                # A rejected override on every spelling would flood the
+                # transcript — 134 rows on one real target, burying the six
+                # results that needed a human. Collapsed into one row after the
+                # loop instead, because emitting nothing at all reads exactly
+                # like an endpoint nobody tried.
+                refused += 1
                 continue
             evidence = exchange.evidence().model_copy(
                 update={
@@ -111,6 +116,17 @@ class ParamOverrideAttack:
             if decision.leaked:
                 return
 
+        if refused:
+            yield skipped(
+                ctx,
+                self.name,
+                endpoint,
+                reason=(
+                    f"every one of {refused} query-parameter spellings was refused; "
+                    "the endpoint does not honour a client-supplied tenant"
+                ),
+            )
+
     def _header_channel(
         self,
         ctx: AttackContext,
@@ -120,11 +136,13 @@ class ParamOverrideAttack:
     ) -> Iterator[ProbeResult]:
         if not columns:
             return
+        refused = 0
         for header in _header_names(columns[0]):
             session = ctx.actor.with_headers({header: victim_id})
             exchange = session.request(endpoint.method, endpoint.path, attack=self.name.value)
             decision = ctx.oracle.judge(exchange.facts(), mode=AccessMode.COLLECTION)
             if decision.verdict is Verdict.ENFORCED:
+                refused += 1
                 continue
             evidence = exchange.evidence().model_copy(
                 update={

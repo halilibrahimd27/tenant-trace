@@ -56,6 +56,12 @@ class CacheAttack:
 
             ids = candidate_ids(endpoint, ctx.victim_ctx, exclude=ctx.excluded_ids)
             if not ids:
+                yield skipped(
+                    ctx,
+                    self.name,
+                    endpoint,
+                    reason="no seeded record matches this endpoint's resource",
+                )
                 continue
             identifier = ids[0]
             path = build_path(
@@ -86,7 +92,17 @@ class CacheAttack:
             warm = ctx.victim.request(endpoint.method, path, attack=self.name.value)
             if not warm.ok:
                 # Nothing was cached, so step 3 could not distinguish a cache
-                # leak from an ordinary refusal.
+                # leak from an ordinary refusal. On one real target this ended
+                # 70 of 110 endpoints in silence, which reads as coverage.
+                yield skipped(
+                    ctx,
+                    self.name,
+                    endpoint,
+                    reason=(
+                        f"the owner could not read this object either (HTTP {warm.status}), "
+                        "so no cache entry existed to test against"
+                    ),
+                )
                 continue
 
             # Step 3 — the same request that was refused in step 1.

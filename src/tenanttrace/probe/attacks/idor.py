@@ -22,6 +22,7 @@ from tenanttrace.probe.attacks.base import (
     build_path,
     candidate_ids,
     is_speculative_path,
+    object_params,
     serves_anyone,
     skipped,
 )
@@ -59,7 +60,12 @@ class IdorAttack:
                 )
                 continue
 
-            for identifier in ids:
+            # When every slot is a tenant slot, build_path discards the
+            # identifier — so iterating ids produced N byte-identical requests
+            # and N duplicate results. 617 of 1454 exchanges in one Baserow run
+            # were exact repeats.
+            attempts = ids if object_params(endpoint, ctx.tenant_path_params) else ids[:1]
+            for identifier in attempts:
                 path = build_path(
                     endpoint,
                     identifier,

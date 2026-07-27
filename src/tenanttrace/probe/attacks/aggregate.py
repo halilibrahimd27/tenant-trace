@@ -17,7 +17,13 @@ from collections.abc import Iterator, Mapping
 from typing import Any
 
 from tenanttrace.core.models import AttackName, ProbeResult, Verdict
-from tenanttrace.probe.attacks.base import ALLOWLISTED, AttackContext, skipped
+from tenanttrace.probe.attacks.base import (
+    ALLOWLISTED,
+    AttackContext,
+    build_path,
+    candidate_ids,
+    skipped,
+)
 from tenanttrace.probe.oracle import ResponseFacts
 
 __all__ = ["AggregateAttack"]
@@ -36,8 +42,17 @@ __all__ = ["AggregateAttack"]
 # is almost always the same endpoint that counts across tenants, and the count
 # field catches it. Where it is not, that gap is documented in the README
 # rather than papered over with a heuristic that fires on correct code.
+# `rowCount` and `row_count` are the same field. Lowercasing alone turned
+# `rowCount` into `rowcount`, which matched neither pattern — so Teable's exact,
+# verified /aggregation/row-count oracle produced nothing across three runs.
+_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 _COUNT_SUFFIX_RE = re.compile(r"^(?P<name>[a-z0-9_]+?)_count$")
 _COUNT_PREFIX_RE = re.compile(r"^count_(?P<name>[a-z0-9_]+)$")
+
+
+def _snake(key: str) -> str:
+    """`rowCount` -> `row_count`; already-snake keys pass through."""
+    return _CAMEL_BOUNDARY.sub("_", key).lower()
 
 
 def _singular(word: str) -> str:
@@ -61,7 +76,7 @@ def _countable_fields(body: Any) -> dict[str, str]:
         return {}
     mapping: dict[str, str] = {}
     for raw_key, value in body.items():
-        key = str(raw_key).lower()
+        key = _snake(str(raw_key))
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             continue
         match = _COUNT_SUFFIX_RE.match(key) or _COUNT_PREFIX_RE.match(key)
@@ -81,23 +96,47 @@ class AggregateAttack:
     def run(self, ctx: AttackContext) -> Iterator[ProbeResult]:
         seeded_kinds = {record.kind for record in ctx.actor_ctx.records}
 
-        for endpoint in ctx.inventory.collections():
+        # collections() only. A count endpoint that carries a path parameter —
+        # Teable's /api/table/{tableId}/aggregation/row-count, an exact verified
+        # oracle — was unreachable, so the attack returned nothing against it.
+        for endpoint in (*ctx.inventory.collections(), *ctx.inventory.objects()):
             if ctx.is_allowlisted(endpoint):
                 yield skipped(ctx, self.name, endpoint, reason=ALLOWLISTED)
                 continue
 
-            exchange = ctx.actor.request(endpoint.method, endpoint.path, attack=self.name.value)
+            ids = candidate_ids(endpoint, ctx.actor_ctx)
+            if endpoint.path_params and not ids:
+                continue
+            path = (
+                build_path(
+                    endpoint,
+                    ids[0],
+                    tenant=ctx.actor_ctx,
+                    tenant_params=ctx.tenant_path_params,
+                )
+                if endpoint.path_params
+                else endpoint.path
+            )
+            exchange = ctx.actor.request(endpoint.method, path, attack=self.name.value)
             facts: ResponseFacts = exchange.facts()
             fields = _countable_fields(facts.json_body)
             if not fields:
+                # Silence reads as "checked and held". Say which it was.
+                yield skipped(
+                    ctx,
+                    self.name,
+                    endpoint,
+                    reason=(
+                        "no count-shaped field in the response, so there was no exact "
+                        "number to compare against the seeded rows"
+                    ),
+                )
                 continue
 
             for field_name, kind in fields.items():
                 if kind not in seeded_kinds:
-                    # We have no ground truth for this resource, so any
-                    # comparison would be a guess. Skipping silently is correct
-                    # here: this is not an untested endpoint, it is a field we
-                    # deliberately decline to judge.
+                    # No ground truth for this resource, so any comparison
+                    # would be a guess.
                     continue
 
                 expected = ctx.actor_ctx.count_of(kind)

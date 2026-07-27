@@ -22,7 +22,14 @@ from collections.abc import Iterator
 from typing import Any
 
 from tenanttrace.core.models import AttackName, Endpoint, HttpMethod, ProbeResult, Verdict
-from tenanttrace.probe.attacks.base import ALLOWLISTED, AttackContext, resource_name, skipped
+from tenanttrace.probe.attacks.base import (
+    ALLOWLISTED,
+    AttackContext,
+    build_path,
+    candidate_ids,
+    resource_name,
+    skipped,
+)
 
 __all__ = ["MassAssignAttack"]
 
@@ -65,9 +72,37 @@ class MassAssignAttack:
                 yield skipped(ctx, self.name, endpoint, reason=ALLOWLISTED)
                 continue
 
+            # creators() includes POSTs that carry path parameters, and the
+            # raw template was sent verbatim: 190 of 218 exchanges in one run
+            # had a literal %7Bid%7D in the URL, and their 404s were reported
+            # as "target rejected the cross-tenant write" — an authorization
+            # claim about a URL that cannot exist.
+            ids = candidate_ids(endpoint, ctx.actor_ctx)
+            if endpoint.path_params and not ids:
+                yield skipped(
+                    ctx,
+                    self.name,
+                    endpoint,
+                    reason=(
+                        "no seeded record fits this endpoint's path parameters, so no "
+                        "real URL could be built to write to"
+                    ),
+                )
+                continue
+            path = (
+                build_path(
+                    endpoint,
+                    ids[0],
+                    tenant=ctx.actor_ctx,
+                    tenant_params=ctx.tenant_path_params,
+                )
+                if endpoint.path_params
+                else endpoint.path
+            )
+
             body = self._build_body(endpoint, ctx, column)
             exchange = ctx.actor.request(
-                endpoint.method, endpoint.path, json_body=body, attack=self.name.value
+                endpoint.method, path, json_body=body, attack=self.name.value
             )
 
             decision = ctx.oracle.judge_ownership(exchange.facts(), tenant_field=column)

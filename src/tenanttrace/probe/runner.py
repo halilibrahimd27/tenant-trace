@@ -68,12 +68,25 @@ __all__ = ["ProbeOptions", "ProbeOutcome", "run_probe"]
 
 # Attack ordering. Read-only attacks run first so that a mutating attack cannot
 # perturb the counts an aggregate check depends on.
+# Order is load-bearing, and for one reason: **the cache attack must run before
+# anything that reads an object as its owner.** Its whole method is to request
+# an object cold, have the owner read it, then request it again — so any
+# earlier owner-read has already populated a tenant-less cache entry, the cold
+# step leaks, and the cache finding is reported as a plain IDOR or lost.
+#
+# Three separate changes tripped over this: a route-liveness check inside the
+# attack loop (twice), and extending the aggregate attack to object endpoints.
+# The fixture tests caught all three within minutes; this comment exists so the
+# fourth does not have to be caught at all.
+#
+# Mutating attacks still run last, so nothing this run created can be counted
+# as a row the application leaked.
 _ATTACK_ORDER: tuple[AttackName, ...] = (
     AttackName.IDOR,
     AttackName.LISTING,
-    AttackName.AGGREGATE,
     AttackName.PARAM_OVERRIDE,
     AttackName.CACHE,
+    AttackName.AGGREGATE,
     AttackName.MASS_ASSIGN,
 )
 
