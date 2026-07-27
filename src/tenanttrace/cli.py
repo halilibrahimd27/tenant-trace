@@ -378,6 +378,10 @@ def probe(
 def scan(
     path: Annotated[Path, typer.Option("--path", "-p", help="Source tree to analyse")],
     config_path: ConfigOption = Path("tenanttrace.toml"),
+    output: Annotated[
+        str,
+        typer.Option("--format", "-f", help="text (default) or json"),
+    ] = "text",
 ) -> None:
     """Run the static engine. Everything it reports is a hypothesis.
 
@@ -395,6 +399,32 @@ def scan(
         config = Config(target=TargetConfig(base_url="http://127.0.0.1"))
 
     result = scan_path(path, config)
+
+    if output == "json":
+        # For anything that reads this rather than looks at it — the editor
+        # hook, a CI step, a script. Scraping the table works until a long
+        # location wraps across three rows, which is most of them.
+        console.print_json(
+            data={
+                "files_scanned": result.files_scanned,
+                "scoping_mode": result.scoping.mode.value,
+                "warnings": list(result.warnings),
+                "findings": [
+                    {
+                        "category": finding.category.value,
+                        "severity": finding.severity.value,
+                        "confidence": finding.confidence.value,
+                        "title": finding.title,
+                        "location": finding.location,
+                        "file": finding.evidence.file,
+                        "line": finding.evidence.line,
+                    }
+                    for finding in sorted(result.findings, key=lambda f: f.sort_key)
+                ],
+            }
+        )
+        return
+
     console.print(
         f"scanned {count(result.files_scanned, 'file')}; scoping mode detected: "
         f"[bold]{result.scoping.mode.value}[/]"
