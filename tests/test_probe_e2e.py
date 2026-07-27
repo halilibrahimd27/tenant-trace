@@ -283,3 +283,32 @@ def test_run_report_round_trips_through_json(vulnerable_report) -> None:  # type
     restored = RunReport.model_validate_json(vulnerable_report.model_dump_json())
     assert len(restored.findings) == len(vulnerable_report.findings)
     assert restored.status is vulnerable_report.status
+
+
+# --------------------------------------------------------------------------- #
+# Coverage arithmetic: what counts as evidence and what only looks like it
+# --------------------------------------------------------------------------- #
+
+
+def test_an_allowlisted_endpoint_is_recorded_not_silently_dropped(safe_report) -> None:  # type: ignore[no-untyped-def]
+    """Both fixtures allowlist `/api/admin/*` — it crosses tenants on purpose.
+
+    Six attacks used to `continue` past such an endpoint and emit nothing at
+    all, so it appeared in no finding, no refused count and no coverage row —
+    which reads exactly like an endpoint that was checked and held. Silence is
+    the one thing a coverage report may never say.
+    """
+    admin = [r for r in safe_report.results if r.endpoint.path.startswith("/api/admin")]
+    assert admin, "the allowlisted endpoint left no trace in the run at all"
+    assert all(r.verdict is Verdict.INCONCLUSIVE for r in admin)
+    assert all("cross_tenant_allowlist" in r.detail for r in admin)
+
+
+def test_an_allowlisted_endpoint_is_never_counted_as_refused(safe_report) -> None:  # type: ignore[no-untyped-def]
+    refused = [r for r in safe_report.results if r.verdict is Verdict.ENFORCED]
+    assert not any(r.endpoint.path.startswith("/api/admin") for r in refused)
+
+
+def test_allowlisted_endpoints_produce_no_findings(safe_report) -> None:  # type: ignore[no-untyped-def]
+    """Recording the skip must not turn into reporting it as a problem."""
+    assert not [f for f in safe_report.findings if "/api/admin" in f.location]

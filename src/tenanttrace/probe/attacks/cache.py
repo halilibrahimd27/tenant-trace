@@ -30,7 +30,14 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 from tenanttrace.core.models import AttackName, ProbeResult, Verdict
-from tenanttrace.probe.attacks.base import AttackContext, build_path, candidate_ids
+from tenanttrace.probe.attacks.base import (
+    ALLOWLISTED,
+    AttackContext,
+    build_path,
+    candidate_ids,
+    is_speculative_path,
+    skipped,
+)
 from tenanttrace.probe.oracle import AccessMode
 
 __all__ = ["CacheAttack"]
@@ -44,6 +51,7 @@ class CacheAttack:
     def run(self, ctx: AttackContext) -> Iterator[ProbeResult]:
         for endpoint in ctx.inventory.objects():
             if ctx.is_allowlisted(endpoint):
+                yield skipped(ctx, self.name, endpoint, reason=ALLOWLISTED)
                 continue
 
             ids = candidate_ids(endpoint, ctx.victim_ctx, exclude=ctx.excluded_ids)
@@ -55,7 +63,10 @@ class CacheAttack:
             # Step 1 — cold. A leak here is an IDOR, not a cache bug.
             cold = ctx.actor.request(endpoint.method, path, attack=self.name.value)
             cold_decision = ctx.oracle.judge(
-                cold.facts(), mode=AccessMode.OBJECT, sent_ids=[identifier]
+                cold.facts(),
+                mode=AccessMode.OBJECT,
+                sent_ids=[identifier],
+                speculative_path=is_speculative_path(endpoint),
             )
             if cold_decision.leaked:
                 continue
@@ -72,7 +83,10 @@ class CacheAttack:
             # Step 3 — the same request that was refused in step 1.
             hot = ctx.actor.request(endpoint.method, path, attack=self.name.value)
             hot_decision = ctx.oracle.judge(
-                hot.facts(), mode=AccessMode.OBJECT, sent_ids=[identifier]
+                hot.facts(),
+                mode=AccessMode.OBJECT,
+                sent_ids=[identifier],
+                speculative_path=is_speculative_path(endpoint),
             )
 
             if not hot_decision.leaked:

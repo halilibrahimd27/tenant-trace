@@ -36,6 +36,7 @@ from typing import Any
 from tenanttrace.core.models import (
     CANARY_PREFIX,
     CANARY_RE,
+    THROTTLE_STATUSES,
     TenantContext,
     TenantLabel,
     Verdict,
@@ -387,6 +388,7 @@ class TenantOracle:
         *,
         mode: AccessMode,
         sent_ids: Iterable[str] = (),
+        speculative_path: bool = False,
     ) -> OracleDecision:
         """Decide whether this response leaked the victim's data.
 
@@ -447,10 +449,17 @@ class TenantOracle:
                 ),
             )
 
-        return self._judge_quiet_response(facts, mode=mode, status=status)
+        return self._judge_quiet_response(
+            facts, mode=mode, status=status, speculative_path=speculative_path
+        )
 
     def _judge_quiet_response(
-        self, facts: ResponseFacts, *, mode: AccessMode, status: int
+        self,
+        facts: ResponseFacts,
+        *,
+        mode: AccessMode,
+        status: int,
+        speculative_path: bool = False,
     ) -> OracleDecision:
         """Read a response that carried no victim data at all."""
         truncated = " (body truncated before scanning)" if facts.truncated else ""
@@ -465,6 +474,22 @@ class TenantOracle:
                     f"response exceeded the {MAX_SCAN_BYTES // (1024 * 1024)} MiB scan limit, "
                     "so the unscanned remainder could contain the other tenant's data; this "
                     "is not evidence of isolation"
+                ),
+            )
+
+        # 429 is the server declining to *process* the request. It is not a
+        # decision about who owns the object, and counting it as one means a
+        # target that rate-limits the prober into uselessness reports as
+        # "refused everything, correctly" — the exact failure RunStatus.INVALID
+        # exists to prevent, arriving through a door rule 4 did not cover.
+        # Found by auditing a real application that answered 429 to 134 of 168
+        # attempts and was reported clean.
+        if status in THROTTLE_STATUSES:
+            return OracleDecision(
+                verdict=Verdict.INCONCLUSIVE,
+                reason=(
+                    f"target answered {status}: the request was throttled, so the "
+                    "application never decided whether this tenant may have the object"
                 ),
             )
 
@@ -483,6 +508,19 @@ class TenantOracle:
             )
 
         if mode is AccessMode.OBJECT:
+            # A 404 for a path we assembled by putting one id into several
+            # parameter slots is far more likely to mean "no such URL" than
+            # "you may not have this". 401/403 are still real authorisation
+            # decisions and stay ENFORCED — only 404 is ambiguous here.
+            if status == 404 and speculative_path:
+                return OracleDecision(
+                    verdict=Verdict.INCONCLUSIVE,
+                    reason=(
+                        "target returned 404, but the request path carried the same "
+                        "identifier in every parameter, so the URL probably addressed "
+                        "no record at all; this is not evidence of enforcement"
+                    ),
+                )
             if status in {401, 403, 404}:
                 return OracleDecision(
                     verdict=Verdict.ENFORCED,

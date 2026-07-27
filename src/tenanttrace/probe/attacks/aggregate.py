@@ -17,7 +17,7 @@ from collections.abc import Iterator, Mapping
 from typing import Any
 
 from tenanttrace.core.models import AttackName, ProbeResult, Verdict
-from tenanttrace.probe.attacks.base import AttackContext
+from tenanttrace.probe.attacks.base import ALLOWLISTED, AttackContext, skipped
 from tenanttrace.probe.oracle import ResponseFacts
 
 __all__ = ["AggregateAttack"]
@@ -83,6 +83,7 @@ class AggregateAttack:
 
         for endpoint in ctx.inventory.collections():
             if ctx.is_allowlisted(endpoint):
+                yield skipped(ctx, self.name, endpoint, reason=ALLOWLISTED)
                 continue
 
             exchange = ctx.actor.request(endpoint.method, endpoint.path, attack=self.name.value)

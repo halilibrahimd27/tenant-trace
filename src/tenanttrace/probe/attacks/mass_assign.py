@@ -22,7 +22,7 @@ from collections.abc import Iterator
 from typing import Any
 
 from tenanttrace.core.models import AttackName, Endpoint, HttpMethod, ProbeResult, Verdict
-from tenanttrace.probe.attacks.base import AttackContext, resource_name
+from tenanttrace.probe.attacks.base import ALLOWLISTED, AttackContext, resource_name, skipped
 
 __all__ = ["MassAssignAttack"]
 
@@ -62,6 +62,7 @@ class MassAssignAttack:
         column = columns[0]
         for endpoint in ctx.inventory.creators():
             if ctx.is_allowlisted(endpoint):
+                yield skipped(ctx, self.name, endpoint, reason=ALLOWLISTED)
                 continue
 
             body = self._build_body(endpoint, ctx, column)

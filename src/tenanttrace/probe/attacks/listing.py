@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 from tenanttrace.core.models import AttackName, ProbeResult, Verdict
-from tenanttrace.probe.attacks.base import AttackContext
+from tenanttrace.probe.attacks.base import ALLOWLISTED, AttackContext, skipped
 from tenanttrace.probe.oracle import AccessMode, OracleDecision
 from tenanttrace.probe.session import Exchange
 
@@ -47,6 +47,7 @@ class ListingAttack:
     def run(self, ctx: AttackContext) -> Iterator[ProbeResult]:
         for endpoint in ctx.inventory.collections():
             if ctx.is_allowlisted(endpoint):
+                yield skipped(ctx, self.name, endpoint, reason=ALLOWLISTED)
                 continue
 
             exchange = ctx.actor.request(endpoint.method, endpoint.path, attack=self.name.value)

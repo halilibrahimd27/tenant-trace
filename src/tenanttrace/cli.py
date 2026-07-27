@@ -29,7 +29,14 @@ from rich.table import Table
 from tenanttrace import __version__
 from tenanttrace._importing import ensure_cwd_importable
 from tenanttrace.core.config import Config, ConfigError, TargetConfig, load_config
-from tenanttrace.core.models import Confidence, Finding, RunReport, RunStatus, Severity
+from tenanttrace.core.models import (
+    Confidence,
+    Finding,
+    RunReport,
+    RunStatus,
+    Severity,
+    Verdict,
+)
 from tenanttrace.core.text import count
 
 app = typer.Typer(
@@ -149,15 +156,19 @@ def _print_verdict(report: RunReport) -> None:
             "tenant's data was returned. Each finding carries the request that proved it."
         )
         return
-    if not report.results:
+    enforced = sum(1 for r in report.results if r.verdict is Verdict.ENFORCED)
+    undecided = sum(1 for r in report.results if r.verdict is Verdict.INCONCLUSIVE)
+    if not enforced:
         err.print(
-            "[bold yellow]! Nothing was tested[/] — no cross-tenant attempt was made, so "
-            "this run is not evidence of isolation."
+            "[bold yellow]! Nothing was proven either way[/] — not one cross-tenant "
+            f"attempt was refused ({count(undecided, 'attempt')} could not be judged). "
+            "This run is not evidence of isolation."
         )
         return
+    trailer = f", {count(undecided, 'attempt')} undecided" if undecided else ""
     console.print(
-        f"[green]✓ No cross-tenant access proven[/] — {count(len(report.results), 'attempt')} "
-        f"refused across {count(report.endpoints_tested, 'endpoint')}. "
+        f"[green]✓ No cross-tenant access proven[/] — {count(enforced, 'attempt')} "
+        f"refused across {count(report.endpoints_tested, 'endpoint')}{trailer}. "
         "Covers what was probed, not the whole application."
     )
 

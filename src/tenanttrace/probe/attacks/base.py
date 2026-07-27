@@ -136,10 +136,49 @@ def build_path(endpoint: Endpoint, identifier: str) -> str:
     """Substitute one identifier into every path parameter of an endpoint.
 
     Multi-parameter paths (``/api/tenants/{tenant_id}/invoices/{invoice_id}``)
-    get the same value everywhere, which is wrong often enough to matter — the
-    resulting 404 is reported as ``inconclusive``, never as enforcement.
+    get the same value everywhere, which is wrong often enough to matter. Pass
+    :func:`is_speculative_path` to the oracle alongside the response so a 404
+    caused by our own guess is not read as the application refusing us.
     """
     return substitute_path(endpoint.path, dict.fromkeys(endpoint.path_params, identifier))
+
+
+def is_speculative_path(endpoint: Endpoint) -> bool:
+    """Did :func:`build_path` have to invent part of this URL?
+
+    One parameter, one seeded id: the URL is exactly what we meant. Two or
+    more and the same id goes into every slot, so the path very likely
+    addresses no record at all — and its 404 says nothing about isolation.
+    """
+    return len(endpoint.path_params) > 1
+
+
+def skipped(
+    ctx: AttackContext,
+    attack: AttackName,
+    endpoint: Endpoint,
+    *,
+    reason: str,
+) -> ProbeResult:
+    """Record that an endpoint was deliberately not attacked.
+
+    Six attack modules used to ``continue`` past an allowlisted endpoint
+    without emitting anything. The endpoint then appeared nowhere: not in the
+    findings, not in the refused count, not in the coverage table — which reads
+    exactly like an endpoint that was checked and held. Silence is the one
+    thing a coverage report may never say.
+    """
+    return ProbeResult(
+        attack=attack,
+        endpoint=endpoint,
+        actor=ctx.actor_ctx.label,
+        target=ctx.victim_ctx.label,
+        verdict=Verdict.INCONCLUSIVE,
+        detail=reason,
+    )
+
+
+ALLOWLISTED = "excluded by [tenancy] cross_tenant_allowlist, so it was not attacked"
 
 
 def result_from(

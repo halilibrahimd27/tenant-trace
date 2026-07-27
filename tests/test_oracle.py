@@ -384,3 +384,55 @@ def test_oversized_body_is_truncated_and_says_so() -> None:
     facts = facts_from_parts(status=200, text="x" * (5 * 1024 * 1024))
     assert facts.truncated is True
     assert len(facts.text) == 4 * 1024 * 1024
+
+
+# --------------------------------------------------------------------------- #
+# Not every non-2xx is a decision
+#
+# Found by pointing the tool at a real application behind a rate limiter: it
+# answered 429 to 134 of 168 attempts and the run came back VALID and clean.
+# --------------------------------------------------------------------------- #
+
+
+def test_a_throttled_request_is_not_a_refusal(oracle) -> None:  # type: ignore[no-untyped-def]
+    """429 means "not now", never "not yours"."""
+    for mode in (AccessMode.OBJECT, AccessMode.COLLECTION):
+        decision = oracle.judge(facts_from_parts(status=429, text="{}"), mode=mode)
+        assert decision.verdict is Verdict.INCONCLUSIVE
+        assert "throttled" in decision.reason
+
+
+def test_a_throttled_response_carrying_the_canary_is_still_a_leak() -> None:
+    """Positive evidence outranks every status-code rule, 429 included."""
+    victim = make_tenant(TenantLabel.B, canary="tt-canary-B-bbbbbbbbbbbbbbbb")
+    oracle = TenantOracle(actor=make_tenant(TenantLabel.A), victim=victim)
+    decision = oracle.judge(
+        facts_from_parts(status=429, text=json.dumps({"note": victim.canary})),
+        mode=AccessMode.OBJECT,
+    )
+    assert decision.verdict is Verdict.LEAKED
+
+
+def test_a_404_from_a_url_we_invented_is_not_enforcement(oracle) -> None:  # type: ignore[no-untyped-def]
+    """build_path puts one id in every slot; the 404 is our fault, not a refusal."""
+    decision = oracle.judge(
+        facts_from_parts(status=404, text=""), mode=AccessMode.OBJECT, speculative_path=True
+    )
+    assert decision.verdict is Verdict.INCONCLUSIVE
+    assert "addressed no record" in decision.reason
+
+
+def test_a_404_on_a_path_we_addressed_exactly_is_still_enforcement(oracle) -> None:  # type: ignore[no-untyped-def]
+    decision = oracle.judge(
+        facts_from_parts(status=404, text=""), mode=AccessMode.OBJECT, speculative_path=False
+    )
+    assert decision.verdict is Verdict.ENFORCED
+
+
+def test_a_speculative_path_does_not_excuse_a_403(oracle) -> None:  # type: ignore[no-untyped-def]
+    """401 and 403 are authorisation decisions whatever the URL looked like."""
+    for status in (401, 403):
+        decision = oracle.judge(
+            facts_from_parts(status=status, text=""), mode=AccessMode.OBJECT, speculative_path=True
+        )
+        assert decision.verdict is Verdict.ENFORCED

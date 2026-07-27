@@ -403,10 +403,37 @@ def test_a_clean_run_says_what_it_does_and_does_not_cover() -> None:
     assert "not the whole application" in page
 
 
-def test_a_run_that_attempted_nothing_is_not_reported_as_clean() -> None:
+def test_a_run_that_refused_nothing_is_not_reported_as_clean() -> None:
+    """Zero attempts and zero decisions are the same claim: no evidence."""
     page = render_html(_report(results=(), findings=()))
     assert "class='verdict good'" not in page
-    assert "Nothing was tested" in page
+    assert "Nothing was proven either way" in page
+
+
+def test_undecided_attempts_are_never_counted_as_refusals() -> None:
+    """The defect this replaces: a page claiming 168 refusals beside a tile
+    reading 26, because the verdict counted results instead of enforcement."""
+    endpoint = Endpoint(method=HttpMethod.GET, path="/api/x", path_params=())
+
+    def result(verdict: Verdict) -> ProbeResult:
+        return ProbeResult(
+            attack=AttackName.IDOR,
+            endpoint=endpoint,
+            actor=TenantLabel.A,
+            target=TenantLabel.B,
+            verdict=verdict,
+            detail="d",
+        )
+
+    results = (result(Verdict.ENFORCED), *[result(Verdict.INCONCLUSIVE)] * 9)
+    page = render_html(_report(results=results, findings=()))
+    verdict = page[page.index("class='verdict") :].split("</div>")[0]
+
+    assert "1 cross-tenant attempt" in verdict
+    assert "was refused" in verdict
+    assert "9 attempts could not be judged" in verdict
+    # The total is still reported — as attempts, which is what it is.
+    assert "10 cross-tenant attempts across" in page
 
 
 def test_an_invalid_run_gets_the_banner_and_no_second_verdict() -> None:

@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 from tenanttrace.core.models import AttackName, Endpoint, ProbeResult, Verdict
-from tenanttrace.probe.attacks.base import AttackContext
+from tenanttrace.probe.attacks.base import ALLOWLISTED, AttackContext, skipped
 from tenanttrace.probe.oracle import AccessMode
 
 __all__ = ["ParamOverrideAttack"]
@@ -48,6 +48,7 @@ class ParamOverrideAttack:
         columns = ctx.tenancy_columns()
         for endpoint in ctx.inventory.collections():
             if ctx.is_allowlisted(endpoint):
+                yield skipped(ctx, self.name, endpoint, reason=ALLOWLISTED)
                 continue
 
             # Differential test. An endpoint that already returns the victim's

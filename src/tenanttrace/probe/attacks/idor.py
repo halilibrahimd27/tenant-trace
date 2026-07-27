@@ -16,7 +16,14 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 from tenanttrace.core.models import AttackName, ProbeResult, Verdict
-from tenanttrace.probe.attacks.base import AttackContext, build_path, candidate_ids
+from tenanttrace.probe.attacks.base import (
+    ALLOWLISTED,
+    AttackContext,
+    build_path,
+    candidate_ids,
+    is_speculative_path,
+    skipped,
+)
 from tenanttrace.probe.oracle import AccessMode
 
 __all__ = ["IdorAttack"]
@@ -30,6 +37,7 @@ class IdorAttack:
     def run(self, ctx: AttackContext) -> Iterator[ProbeResult]:
         for endpoint in ctx.inventory.objects():
             if ctx.is_allowlisted(endpoint):
+                yield skipped(ctx, self.name, endpoint, reason=ALLOWLISTED)
                 continue
 
             ids = candidate_ids(endpoint, ctx.victim_ctx, exclude=ctx.excluded_ids)
@@ -54,7 +62,10 @@ class IdorAttack:
                 path = build_path(endpoint, identifier)
                 exchange = ctx.actor.request(endpoint.method, path, attack=self.name.value)
                 decision = ctx.oracle.judge(
-                    exchange.facts(), mode=AccessMode.OBJECT, sent_ids=[identifier]
+                    exchange.facts(),
+                    mode=AccessMode.OBJECT,
+                    sent_ids=[identifier],
+                    speculative_path=is_speculative_path(endpoint),
                 )
 
                 evidence = exchange.evidence().model_copy(

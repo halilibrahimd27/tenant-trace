@@ -698,7 +698,12 @@ def _html_verdict(report: RunReport) -> list[str]:
         return []  # the INVALID banner already said it, louder.
 
     confirmed = len(report.confirmed)
-    attempts = len(report.results)
+    # Enforcement, not attempts. `results` includes every INCONCLUSIVE — a
+    # throttled request, a redirect, an endpoint that was skipped — and calling
+    # those "refused" is how a run against a rate-limiting target came back
+    # claiming 168 refusals on a page whose own tile said 26.
+    enforced = len(_enforced(report))
+    undecided = len([r for r in report.results if r.verdict is Verdict.INCONCLUSIVE])
     if confirmed:
         tenants = len({r.actor for r in report.results if r.verdict is Verdict.LEAKED})
         return [
@@ -710,21 +715,30 @@ def _html_verdict(report: RunReport) -> list[str]:
             f"Each finding below carries the request that proved it.</span>",
             "</div>",
         ]
-    if not attempts:
+    if not enforced:
         return [
             "<div class='verdict warn'>",
-            "<strong>Nothing was tested</strong>",
-            "<span>No cross-tenant attempt was made, so this run is not evidence "
-            "of isolation. Check the endpoint inventory and the seeded tenants.</span>",
+            "<strong>Nothing was proven either way</strong>",
+            f"<span>Not one cross-tenant attempt was refused"
+            f"{f' — {_count(undecided, 'attempt')} could not be judged' if undecided else ''}"
+            ". This run is not evidence of isolation. Check the endpoint "
+            "inventory, the seeded tenants, and the notes under run integrity.</span>",
             "</div>",
         ]
     return [
         "<div class='verdict good'>",
         "<strong>No cross-tenant access proven</strong>",
-        f"<span>{attempts} attempts were made against "
-        f"{report.endpoints_tested} endpoint{'' if report.endpoints_tested == 1 else 's'} "
-        "with real credentials for a second tenant, and the application refused "
-        "them. This covers what was probed — not the whole application.</span>",
+        f"<span>{_count(enforced, 'cross-tenant attempt')} against "
+        f"{_count(report.endpoints_tested, 'endpoint')} "
+        f"{'was' if enforced == 1 else 'were'} refused by the application, "
+        "using real credentials for a second tenant."
+        + (
+            f" A further {_count(undecided, 'attempt')} could not be judged and "
+            "count as neither."
+            if undecided
+            else ""
+        )
+        + " This covers what was probed — not the whole application.</span>",
         "</div>",
     ]
 

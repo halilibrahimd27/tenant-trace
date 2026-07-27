@@ -32,6 +32,7 @@ from tenanttrace.core.config import Config
 from tenanttrace.core.fingerprint import with_fingerprint
 from tenanttrace.core.models import (
     ATTACK_CATEGORIES,
+    THROTTLE_STATUSES,
     AttackName,
     Category,
     Confidence,
@@ -267,6 +268,28 @@ def run_probe(config: Config, options: ProbeOptions | None = None) -> ProbeOutco
             )
             raise _Abort
 
+        # A target that answers 429 to most of the audit has not refused
+        # anything — it has declined to take part. The results still render as
+        # a tidy list of attempts, which is precisely why this has to be caught
+        # here: a run where the application never decided is indistinguishable
+        # from a clean one in every downstream view. Same reasoning as the
+        # positive controls, arriving through a different door.
+        throttled = sum(1 for r in state.results if r.evidence.response_status in THROTTLE_STATUSES)
+        if state.results and throttled / len(state.results) >= THROTTLE_INVALID_RATIO:
+            invalid_reason = (
+                f"the target throttled {throttled} of {len(state.results)} attempts "
+                f"({throttled / len(state.results):.0%}). It never decided whether "
+                "these requests were allowed, so this run is not evidence of "
+                "isolation. Lower [probe] rate_limit or raise the target's limit "
+                "and run again."
+            )
+            raise _Abort
+        if throttled:
+            state.errors.append(
+                f"{throttled} of {len(state.results)} attempts were throttled (HTTP 429) "
+                "and count as neither refused nor leaked"
+            )
+
         findings = _findings_from(state.results, config)
 
     except _Abort:
@@ -302,6 +325,12 @@ def run_probe(config: Config, options: ProbeOptions | None = None) -> ProbeOutco
 
     artifact_dir = _write_artifacts(config, opts, report, list(sessions.values()), started)
     return ProbeOutcome(report=report, artifact_dir=artifact_dir, plan=dry_plan)
+
+
+# Past this share of throttled attempts the run is not an audit, it is a
+# rate-limit test. Half is deliberately blunt: the exact number matters far
+# less than refusing to call such a run clean.
+THROTTLE_INVALID_RATIO = 0.5
 
 
 class _Abort(Exception):

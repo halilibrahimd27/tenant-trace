@@ -26,6 +26,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 __all__ = [
+    "THROTTLE_STATUSES",
     "ATTACK_CATEGORIES",
     "CANARY_PREFIX",
     "CANARY_RE",
@@ -65,6 +66,12 @@ CANARY_RE = re.compile(rf"{CANARY_PREFIX}-[A-Za-z0-9]+-[0-9a-f]{{8,}}")
 # --------------------------------------------------------------------------- #
 # Enumerations
 # --------------------------------------------------------------------------- #
+
+
+# Statuses that mean "not now", never "not yours". An application under a rate
+# limiter has not authorised or refused anything, so a throttled attempt is not
+# evidence of isolation in either direction.
+THROTTLE_STATUSES: frozenset[int] = frozenset({429})
 
 
 class Severity(enum.StrEnum):
