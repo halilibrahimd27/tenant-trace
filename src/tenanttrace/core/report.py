@@ -495,6 +495,7 @@ th,td { text-align:left; padding:.45rem .7rem; border-bottom:1px solid var(--lin
 th { color:var(--muted); font-weight:640; font-size:.68rem; text-transform:uppercase;
      letter-spacing:.09em; }
 td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+td.mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.84rem; }
 
 /* The verdict block. Three states, and the colour is doing real work: it has
    to be readable as good/bad before a word of it is read. */
@@ -613,6 +614,41 @@ footer { margin-top:3.5rem; padding-top:1.1rem; border-top:1px solid var(--line)
 @media (prefers-reduced-motion: reduce) {
   * { animation:none !important; transition:none !important; }
 }
+
+/* A security report gets printed and attached to a ticket, so it has to
+   survive leaving the browser. Forced to the light palette because a dark
+   page prints as a black rectangle, everything collapsed open because a
+   <details> that is shut prints as a heading with nothing under it, and every
+   card kept off a page break so evidence is not split from the finding it
+   proves. */
+@media print {
+  :root {
+    --bg:#FFF; --card:#FFF; --ink:#000; --muted:#444; --line:#BBB;
+    --accent:#1F3A52; --code:#F2F2F2;
+    --critical:#8C1D18; --high:#8A4300; --medium:#6B4E00; --low:#0B5566;
+    --info:#444; --ok:#14532D;
+  }
+  body { padding:0; font-size:10.5pt; }
+  .wrap { max-width:none; padding:0; }
+  details > summary { display:none; }
+  details > *:not(summary) { display:revert; }
+  details.glossary { break-before:page; }
+  .card, .verdict, .invalid, svg.graph, table { break-inside:avoid; }
+  h2 { break-after:avoid; }
+  .tiles { break-inside:avoid; }
+  a { color:inherit; text-decoration:none; }
+  /* A printed page has no hover, so a URL the reader cannot see is a dead
+     reference. Only external ones — anchors within the report are useless. */
+  a[href^="http"]::after { content:" (" attr(href) ")"; font-size:.85em; color:var(--muted); }
+}
+
+/* Scope: what the run was pointed at, and what it could not reach. */
+dl.scope { display:grid; grid-template-columns:repeat(auto-fit,minmax(13rem,1fr));
+           gap:.9rem 1.5rem; margin:0 0 1.25rem; }
+dl.scope > div { display:flex; flex-direction:column; gap:.1rem; }
+dl.scope dt { font-size:.65rem; font-weight:660; letter-spacing:.09em;
+              text-transform:uppercase; color:var(--muted); }
+dl.scope dd { margin:0; font-size:.88rem; overflow-wrap:anywhere; }
 """
 
 
@@ -643,9 +679,10 @@ def render_html(report: RunReport, *, redact: bool = True) -> str:
         f"<style>{_CSS}</style>",
         "</head><body><div class='wrap'>",
         "<h1>TenantTrace — tenant isolation audit</h1>",
-        f"<p class='meta run'>{_e(prepared.target)} · run <strong>{_e(status)}</strong> · "
-        f"tenanttrace {_e(prepared.tool_version)} · "
-        f"{_e(prepared.started_at.replace(microsecond=0).isoformat())}{_e(_took(prepared))}</p>",
+        # Status only. Target, tool, time and duration are stated once, under
+        # Scope; repeating them here made the first two lines of the report
+        # the same two facts twice.
+        f"<p class='meta run'>run <strong>{_e(status)}</strong> · " f"{_e(prepared.target)}</p>",
     ]
 
     if prepared.status is not RunStatus.VALID:
@@ -663,6 +700,7 @@ def render_html(report: RunReport, *, redact: bool = True) -> str:
     # answer is a section that delays it. Method and coverage come after, where
     # they belong: as the reason to believe the answer.
     parts += _html_verdict(prepared)
+    parts += _html_scope(prepared)
     parts += _html_summary(prepared)
     parts += _html_graph(prepared)
 
@@ -683,6 +721,7 @@ def render_html(report: RunReport, *, redact: bool = True) -> str:
     )
     parts += _html_controls(prepared)
     parts += _html_coverage(prepared)
+    parts += _html_standards(prepared)
     parts += _html_glossary()
     parts += [
         "<footer>Confirmed findings are proven by seeded canaries, not inferred. "
@@ -751,6 +790,38 @@ def _html_verdict(report: RunReport) -> list[str]:
     ]
 
 
+def _html_scope(report: RunReport) -> list[str]:
+    """What this run was pointed at, and what it could not reach.
+
+    The single most common way to misread a security report is to treat its
+    scope as the whole system. Six lines stating the target, the surface, and
+    what was excluded cost nothing and remove that reading — and a report a
+    team forwards to a client is expected to open with them.
+    """
+    untested = report.endpoints_discovered - report.endpoints_tested
+    attacks = ", ".join(a.value for a in report.attacks_run) or "none"
+    duration = _duration_seconds(report)
+    rows = [
+        ("Target", f"<code>{_e(report.target)}</code>"),
+        ("Started", _e(report.started_at.replace(microsecond=0).isoformat())),
+        ("Duration", f"{duration:.1f}s" if duration is not None else "—"),
+        ("Tool", f"tenanttrace {_e(report.tool_version)}"),
+        (
+            "Surface probed",
+            f"{_count(report.endpoints_tested, 'endpoint')} of "
+            f"{report.endpoints_discovered} discovered"
+            + (f" · {untested} not reached" if untested > 0 else ""),
+        ),
+        ("Attacks run", _e(attacks)),
+    ]
+    return [
+        "<h2>Scope</h2>",
+        "<dl class='scope'>",
+        *[f"<div><dt>{_e(label)}</dt><dd>{value}</dd></div>" for label, value in rows],
+        "</dl>",
+    ]
+
+
 def _html_finding_index(report: RunReport) -> list[str]:
     """A jump list, once there are more findings than fit on a screen."""
     ranked = report.ranked()
@@ -766,6 +837,50 @@ def _html_finding_index(report: RunReport) -> list[str]:
     return [
         "<div class='scroll'><table class='index'><thead><tr><th>id</th><th>severity</th>"
         "<th>confidence</th><th>where</th></tr></thead><tbody>",
+        *rows,
+        "</tbody></table></div>",
+    ]
+
+
+def _html_standards(report: RunReport) -> list[str]:
+    """Findings rolled up by the standard they map to.
+
+    Every finding already carries its CWE, OWASP API and ASVS tags, but they
+    sit on badges inside individual cards. A reader working to a control
+    framework wants the other axis — "which of my controls did this run
+    exercise, and what happened" — and reconstructing it by hand from twenty
+    cards is how a report stops being read.
+    """
+    if not report.findings:
+        return []
+
+    by_tag: dict[str, list[Finding]] = {}
+    for finding in report.ranked():
+        for tag in finding.tags:
+            by_tag.setdefault(tag, []).append(finding)
+    if not by_tag:
+        return []
+
+    def order(item: tuple[str, list[Finding]]) -> tuple[int, str]:
+        tag = item[0]
+        family = 0 if tag.startswith("OWASP") else 1 if tag.startswith("CWE") else 2
+        return family, tag
+
+    rows = []
+    for tag, findings in sorted(by_tag.items(), key=order):
+        worst = max(findings, key=lambda f: f.severity.rank).severity
+        links = ", ".join(f"<a href='#{_e(f.id)}'>{_e(f.id)}</a>" for f in findings)
+        rows.append(
+            f"<tr><td class='mono'>{_e(tag)}</td>"
+            f"<td><span class='badge sev-{_e(worst.value)}'>{_e(worst.value)}</span></td>"
+            f"<td class='num'>{len(findings)}</td><td>{links}</td></tr>"
+        )
+
+    return [
+        "<h2>Standards</h2>",
+        "<p class='meta'>Every finding above, indexed by the control it maps to.</p>",
+        "<div class='scroll'><table><thead><tr><th>reference</th><th>worst</th>"
+        "<th class='num'>findings</th><th>ids</th></tr></thead><tbody>",
         *rows,
         "</tbody></table></div>",
     ]
@@ -790,6 +905,13 @@ def _html_glossary() -> list[str]:
             "A tenant reading its own data. If that fails, the harness is broken and "
             "an empty finding list means nothing — so the run is marked INVALID "
             "rather than clean.",
+        ),
+        (
+            "Severity",
+            "The inherent severity of the category, never discounted by how sure "
+            "we are. A suspected critical is still a critical that we are unsure "
+            "about; flattening the two would let a hypothesis disappear below a "
+            "CI threshold.",
         ),
         (
             "Inconclusive",

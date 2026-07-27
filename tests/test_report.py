@@ -574,3 +574,53 @@ def test_the_caption_says_what_is_not_drawn() -> None:
     page = render_html(_report(results=(_leak("/api/x", TenantLabel.A),)))
     assert "could not be judged" in page
     assert "not the same as a thorough audit" in page
+
+
+# --------------------------------------------------------------------------- #
+# A deliverable, not only a web page
+# --------------------------------------------------------------------------- #
+
+
+def test_the_report_states_its_scope_before_its_findings() -> None:
+    """Treating a report's scope as the whole system is the most common way to
+    misread one."""
+    page = render_html(_report())
+    assert "<h2>Scope</h2>" in page
+    assert page.index("<h2>Scope</h2>") < page.index("<h2>Findings</h2>")
+    for label in ("Target", "Surface probed", "Attacks run", "Duration"):
+        assert f"<dt>{label}</dt>" in page
+
+
+def test_endpoints_that_were_never_reached_are_stated_not_implied() -> None:
+    page = render_html(_report(endpoints_tested=4, endpoints_discovered=11))
+    assert "4 endpoints of 11 discovered" in page
+    assert "7 not reached" in page
+
+
+def test_the_scope_is_not_repeated_in_the_header() -> None:
+    page = render_html(_report())
+    head = page[: page.index("<h2>Scope</h2>")]
+    assert head.count("tenanttrace 0") == 0
+
+
+def test_findings_are_indexed_by_the_control_they_map_to() -> None:
+    """A reader working to a control framework wants the other axis."""
+    page = render_html(_report())
+    assert "<h2>Standards</h2>" in page
+    assert "OWASP-API1:2023" in page
+    assert "CWE-639" in page
+
+
+def test_a_clean_run_carries_no_standards_table() -> None:
+    assert "<h2>Standards</h2>" not in render_html(_report(findings=()))
+
+
+def test_the_report_survives_leaving_the_browser() -> None:
+    """It gets printed and attached to a ticket. A dark page prints as a black
+    rectangle, and a closed <details> prints as a heading with nothing under
+    it."""
+    assert "@media print" in _CSS
+    printed = _CSS[_CSS.index("@media print") :]
+    assert "--bg:#FFF" in printed
+    assert "details > summary { display:none; }" in printed
+    assert "break-inside:avoid" in printed
