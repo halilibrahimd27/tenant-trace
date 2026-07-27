@@ -465,11 +465,21 @@ class RunReport(_Frozen):
     finished_at: datetime | None = None
     target: str = ""
     scoping_mode: ScopingMode = ScopingMode.UNKNOWN
+    # Seeded ids too short or too numeric to be evidence. An application with
+    # integer primary keys makes every id unusable, so the run leans entirely
+    # on canaries — which an operator should be told rather than left to
+    # assume an id coverage they did not get.
+    weak_identifiers: int = 0
+    seeded_identifiers: int = 0
     controls: tuple[ControlResult, ...] = ()
     findings: tuple[Finding, ...] = ()
     results: tuple[ProbeResult, ...] = ()
     endpoints_tested: int = 0
     endpoints_discovered: int = 0
+    # Of those, the ones a run of this shape could address at all. A read-only
+    # run can never touch a POST, so counting writes in the denominator makes
+    # every audit look worse than it was.
+    endpoints_reachable: int = 0
     attacks_run: tuple[AttackName, ...] = ()
     errors: tuple[str, ...] = ()
 

@@ -592,8 +592,10 @@ def test_the_report_states_its_scope_before_its_findings() -> None:
 
 
 def test_endpoints_that_were_never_reached_are_stated_not_implied() -> None:
-    page = render_html(_report(endpoints_tested=4, endpoints_discovered=11))
-    assert "4 endpoints of 11 discovered" in page
+    """Counted against what a run of this shape could address, not against
+    every operation the specification declares."""
+    page = render_html(_report(endpoints_tested=4, endpoints_reachable=11, endpoints_discovered=11))
+    assert "4 endpoints of 11 reachable" in page
     assert "7 not reached" in page
 
 
@@ -624,3 +626,41 @@ def test_the_report_survives_leaving_the_browser() -> None:
     assert "--bg:#FFF" in printed
     assert "details > summary { display:none; }" in printed
     assert "break-inside:avoid" in printed
+
+
+# --------------------------------------------------------------------------- #
+# A report has to say what it rests on
+# --------------------------------------------------------------------------- #
+
+
+def test_it_says_which_evidence_signals_were_usable() -> None:
+    """Canaries, ids and counts are not interchangeable, and a reader who
+    assumes all three were available over-reads a clean result."""
+    page = render_html(_report(seeded_identifiers=6, weak_identifiers=0))
+    assert "canaries, identifiers, and exact counts" in page
+
+
+def test_integer_primary_keys_leave_the_run_on_canaries_alone() -> None:
+    page = render_html(_report(seeded_identifiers=6, weak_identifiers=6))
+    assert "all 6 seeded ids are too short or numeric to be evidence" in page
+
+
+def test_a_partial_loss_of_id_evidence_is_quantified() -> None:
+    page = render_html(_report(seeded_identifiers=6, weak_identifiers=2))
+    assert "4 of 6 ids" in page
+
+
+def test_coverage_is_reported_against_what_could_be_reached() -> None:
+    """A read-only run can never touch a POST, so counting writes in the
+    denominator makes every audit look worse than it was."""
+    page = render_html(
+        _report(endpoints_tested=125, endpoints_reachable=125, endpoints_discovered=355)
+    )
+    assert "125 endpoints of 125 reachable" in page
+    assert "355 operations declared" in page
+    assert "not reached" not in page
+
+
+def test_endpoints_that_were_reachable_and_missed_are_still_stated() -> None:
+    page = render_html(_report(endpoints_tested=8, endpoints_reachable=12, endpoints_discovered=40))
+    assert "4 not reached" in page

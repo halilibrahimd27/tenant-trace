@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 from tenanttrace.core.config import load_config
-from tenanttrace.core.models import HttpMethod
+from tenanttrace.core.models import Endpoint, HttpMethod
 from tenanttrace.probe.spec import (
     SpecError,
     load_inventory,
@@ -252,3 +252,42 @@ def test_fallback_replaces_every_parameter() -> None:
 
 def test_path_param_names() -> None:
     assert path_param_names("/api/{a}/x/{b}") == ("a", "b")
+
+
+# --------------------------------------------------------------------------- #
+# Truncation must not delete an area of the API
+# --------------------------------------------------------------------------- #
+
+
+def test_the_cap_keeps_every_area_of_the_api_represented() -> None:
+    """Path order correlates with the API's own grouping, so cutting a sorted
+    list drops whole subsystems. One real spec declared 704 operations and the
+    cut landed mid-alphabet."""
+    import collections
+
+    from tenanttrace.probe.spec import _spread
+
+    endpoints = [
+        Endpoint(method=HttpMethod.GET, path=f"/api/{area}/{n}", path_params=())
+        for area in ("alpha", "beta", "gamma", "delta", "omega")
+        for n in range(20)
+    ]
+    kept = _spread(endpoints, 10)
+    areas = collections.Counter(e.path.split("/")[2] for e in kept)
+    assert len(kept) == 10
+    assert set(areas) == {"alpha", "beta", "gamma", "delta", "omega"}
+
+
+def test_the_reachable_surface_excludes_what_this_run_cannot_touch() -> None:
+    from tenanttrace.probe.spec import EndpointInventory
+
+    inventory = EndpointInventory(
+        endpoints=(
+            Endpoint(method=HttpMethod.GET, path="/api/x", path_params=()),
+            Endpoint(method=HttpMethod.GET, path="/api/x/{id}", path_params=("id",)),
+            Endpoint(method=HttpMethod.POST, path="/api/x", path_params=()),
+        )
+    )
+    assert len(inventory) == 3
+    assert len(inventory.reachable()) == 2
+    assert len(inventory.reachable(allow_mutation=True)) == 3

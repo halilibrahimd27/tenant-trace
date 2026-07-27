@@ -96,6 +96,20 @@ class EndpointInventory:
         """POST endpoints — the mass-assignment surface."""
         return tuple(e for e in self.endpoints if e.method is HttpMethod.POST)
 
+    def reachable(self, *, allow_mutation: bool = False) -> tuple[Endpoint, ...]:
+        """Endpoints a run of this shape can actually address.
+
+        `len(inventory)` counts every operation the specification declares,
+        including the writes a read-only run can never touch — so coverage read
+        as "125 of 355" when 125 *was* the whole readable surface. Reporting
+        against a denominator nothing could have reached makes an audit look
+        worse than it was, which is its own kind of dishonesty.
+        """
+        surface = {e.key: e for e in (*self.objects(), *self.collections())}
+        if allow_mutation:
+            surface.update({e.key: e for e in self.creators()})
+        return tuple(surface.values())
+
     def filtered(self, config: Config) -> EndpointInventory:
         """Drop excluded paths and cap the surface at ``max_endpoints``.
 
@@ -114,12 +128,15 @@ class EndpointInventory:
         if dropped:
             warnings.append(f"{count(dropped, 'endpoint')} skipped by [probe] exclude_paths")
         if len(kept) > config.probe.max_endpoints:
+            before = len(kept)
+            kept = _spread(kept, config.probe.max_endpoints)
             warnings.append(
-                f"inventory truncated to {config.probe.max_endpoints} of {len(kept)} "
+                f"inventory truncated to {config.probe.max_endpoints} of {before} "
                 "endpoints by [probe] max_endpoints — the untested remainder is NOT "
-                "evidence of isolation"
+                "evidence of isolation. The cap is spread across resources rather "
+                "than cutting the path list in half, so no area of the API "
+                "disappears wholesale"
             )
-            kept = kept[: config.probe.max_endpoints]
         return EndpointInventory(tuple(kept), tuple(warnings), self.source)
 
 
@@ -187,6 +204,35 @@ def _body_fields(document: Mapping[str, Any], operation: Mapping[str, Any]) -> t
             if isinstance(props, Mapping):
                 return tuple(str(k) for k in props)
     return ()
+
+
+def _spread(endpoints: list[Endpoint], limit: int) -> list[Endpoint]:
+    """Thin the inventory evenly across resources rather than by path order.
+
+    Truncating a sorted path list looks arbitrary and is not: path order
+    correlates with the API's own grouping, so the cut lands inside a resource
+    and every resource after it vanishes silently. One real specification
+    declared 704 operations and the cut fell mid-alphabet, taking whole
+    subsystems with it while the warning said only that "the remainder" was
+    untested.
+
+    Round-robin by first path segment keeps every area represented, so what is
+    lost is depth rather than a whole half of the application.
+    """
+    groups: dict[str, list[Endpoint]] = {}
+    for endpoint in endpoints:
+        segments = [s for s in endpoint.path.split("/") if s and not s.startswith("{")]
+        groups.setdefault("/".join(segments[:2]) or "/", []).append(endpoint)
+
+    kept: list[Endpoint] = []
+    while len(kept) < limit and any(groups.values()):
+        for bucket in groups.values():
+            if not bucket:
+                continue
+            kept.append(bucket.pop(0))
+            if len(kept) >= limit:
+                break
+    return kept
 
 
 def _base_path(document: Mapping[str, Any]) -> str:

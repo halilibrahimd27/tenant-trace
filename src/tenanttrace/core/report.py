@@ -33,6 +33,7 @@ from tenanttrace.core.models import (
     ProbeResult,
     RunReport,
     RunStatus,
+    ScopingMode,
     Severity,
     Verdict,
 )
@@ -798,7 +799,6 @@ def _html_scope(report: RunReport) -> list[str]:
     what was excluded cost nothing and remove that reading — and a report a
     team forwards to a client is expected to open with them.
     """
-    untested = report.endpoints_discovered - report.endpoints_tested
     attacks = ", ".join(a.value for a in report.attacks_run) or "none"
     duration = _duration_seconds(report)
     rows = [
@@ -806,20 +806,62 @@ def _html_scope(report: RunReport) -> list[str]:
         ("Started", _e(report.started_at.replace(microsecond=0).isoformat())),
         ("Duration", f"{duration:.1f}s" if duration is not None else "—"),
         ("Tool", f"tenanttrace {_e(report.tool_version)}"),
-        (
-            "Surface probed",
-            f"{_count(report.endpoints_tested, 'endpoint')} of "
-            f"{report.endpoints_discovered} discovered"
-            + (f" · {untested} not reached" if untested > 0 else ""),
-        ),
+        ("Surface probed", _e(_surface(report))),
         ("Attacks run", _e(attacks)),
+        ("Evidence", _e(_evidence_basis(report))),
     ]
+    if report.scoping_mode is not ScopingMode.UNKNOWN:
+        # Which half of the static rule set ran. It was carried on the report
+        # and rendered nowhere.
+        rows.append(("Scoping mode", _e(report.scoping_mode.value)))
     return [
         "<h2>Scope</h2>",
         "<dl class='scope'>",
         *[f"<div><dt>{_e(label)}</dt><dd>{value}</dd></div>" for label, value in rows],
         "</dl>",
     ]
+
+
+def _surface(report: RunReport) -> str:
+    """What was probed, against a denominator something could have reached.
+
+    `endpoints_discovered` counts every operation the specification declares,
+    writes included — so a read-only run of an API with 355 operations and 125
+    readable ones reported "125 of 355" and looked like a third of an audit
+    when it was all of one.
+    """
+    reachable = report.endpoints_reachable or report.endpoints_discovered
+    missed = reachable - report.endpoints_tested
+    text = f"{_count(report.endpoints_tested, 'endpoint')} of {reachable} reachable"
+    if missed > 0:
+        text += f" · {missed} not reached"
+    if report.endpoints_discovered > reachable:
+        text += (
+            f" · {report.endpoints_discovered} operations declared, the rest "
+            "outside this run's shape"
+        )
+    return text
+
+
+def _evidence_basis(report: RunReport) -> str:
+    """Which of the three signals this run could actually use.
+
+    Canaries, identifiers and exact counts are not interchangeable. An
+    application with integer primary keys makes every id unusable as evidence,
+    so the run rests on canaries alone — and a reader who assumes otherwise
+    over-reads a clean result.
+    """
+    if not report.seeded_identifiers:
+        return "canaries and exact counts"
+    if report.weak_identifiers >= report.seeded_identifiers:
+        return (
+            f"canaries and exact counts only — all {report.seeded_identifiers} seeded ids "
+            "are too short or numeric to be evidence"
+        )
+    if report.weak_identifiers:
+        usable = report.seeded_identifiers - report.weak_identifiers
+        return f"canaries, exact counts, and {usable} of {report.seeded_identifiers} ids"
+    return "canaries, identifiers, and exact counts"
 
 
 def _html_finding_index(report: RunReport) -> list[str]:

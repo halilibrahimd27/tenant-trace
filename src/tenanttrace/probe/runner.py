@@ -343,6 +343,30 @@ def run_probe(config: Config, options: ProbeOptions | None = None) -> ProbeOutco
                 "and count as neither refused nor leaked"
             )
 
+        # An id that cannot carry evidence is not a smaller signal, it is no
+        # signal — and the report has to say which of the three the run
+        # actually used. `unjudgeable_ids` existed for this and was called
+        # from nothing but its own test.
+        seeded = {r.id for tenant in tenants.values() for r in tenant.records}
+        weak = {
+            identifier
+            for label, tenant in tenants.items()
+            for identifier in TenantOracle(
+                actor=tenant, victim=tenant, tenant_columns=config.tenancy.columns()
+            ).unjudgeable_ids()
+        }
+        if weak and len(weak) == len(seeded):
+            state.errors.append(
+                f"none of the {len(seeded)} seeded ids is usable as evidence — they are "
+                "too short or numeric to tell from a coincidence, so this run rests on "
+                "canaries and exact counts alone"
+            )
+        elif weak:
+            state.errors.append(
+                f"{count(len(weak), 'seeded id')} of {len(seeded)} could not be used as "
+                "evidence (too short or numeric); those records were judged by canary only"
+            )
+
         # Getting `kind` wrong errors nowhere: the run just degrades to trying
         # a few ids blindly at every endpoint, losing both coverage and
         # confidence, and looks entirely normal in the report. Say it out loud.
@@ -425,6 +449,13 @@ def run_probe(config: Config, options: ProbeOptions | None = None) -> ProbeOutco
             results=tuple(state.results),
             endpoints_tested=len(state.endpoints_tested),
             endpoints_discovered=len(inventory),
+            endpoints_reachable=len(
+                inventory.reachable(
+                    allow_mutation=opts.allow_mutation and config.probe.allow_mutation
+                )
+            ),
+            weak_identifiers=len(weak),
+            seeded_identifiers=len(seeded),
             attacks_run=attack_names,
             errors=tuple(state.errors),
         )
