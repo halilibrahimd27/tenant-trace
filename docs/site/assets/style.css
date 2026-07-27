@@ -345,3 +345,62 @@ a { color: inherit; }
 .foot-links { display: flex; gap: 1.4rem; }
 .foot-links a { text-decoration: none; }
 .foot-links a:hover { color: var(--bone); }
+
+
+/* ── Example reports ────────────────────────────────────────────────────
+   The strongest thing this project can show a visitor is its own output, so
+   it gets a section rather than a sentence. Two cards, colour-coded by the
+   answer each report gives — the whole pitch is that those two answers look
+   different and are both trustworthy. */
+.report-cards {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr));
+  margin-top: 2rem;
+}
+.report-card {
+  display: flex;
+  flex-direction: column;
+  gap: .55rem;
+  padding: 1.5rem 1.6rem 1.4rem;
+  background: var(--ink-raised);
+  border: 1px solid var(--ink-line);
+  border-top: 2px solid var(--dim);
+  border-radius: var(--r);
+  text-decoration: none;
+  color: inherit;
+  transition: border-color .15s ease, transform .15s ease;
+}
+.report-card:hover,
+.report-card:focus-visible { transform: translateY(-2px); }
+.report-card h3 {
+  font-family: var(--display);
+  font-size: 1.15rem;
+  font-weight: 600;
+  margin: 0;
+  letter-spacing: -.01em;
+}
+.report-card p { margin: 0; color: var(--muted); font-size: .92rem; line-height: 1.6; }
+.report-tag {
+  font-family: var(--mono);
+  font-size: .68rem;
+  font-weight: 700;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+.report-go {
+  margin-top: .35rem;
+  font-size: .85rem;
+  font-weight: 600;
+  color: var(--bone);
+}
+.report-card.leaking { border-top-color: var(--tenant-b); }
+.report-card.leaking .report-tag { color: var(--tenant-b); }
+.report-card.leaking:hover { border-color: var(--tenant-b); }
+.report-card.clean { border-top-color: var(--seal); }
+.report-card.clean .report-tag { color: var(--seal); }
+.report-card.clean:hover { border-color: var(--seal); }
+
+@media (prefers-reduced-motion: reduce) {
+  .report-card:hover, .report-card:focus-visible { transform: none; }
+}
