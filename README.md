@@ -84,6 +84,13 @@ tool and a placebo.
 | **Parameter override** | `?tenant_id=B`, `X-Tenant-Id: B`, body fields | canary, after a clean baseline |
 | **Cache-key leaks** | correct query, tenant-less cache key | refused cold, served after B warms it |
 | **Cross-tenant writes** | A creates a record inside B | reading it back as B |
+| **Public endpoints** | the same data comes back with *no credential* | replaying the leak anonymously |
+
+The last row is a different bug wearing the same clothes. If an unauthenticated
+request gets the record too, tenant scoping is not the control that failed, and
+adding a `WHERE tenant_id = …` fixes nothing because there is no caller to
+scope to. TenantTrace asks before it blames scoping
+([ADR-0011](docs/adr/0011-public-endpoints-are-a-different-bug.md)).
 
 The cache case is the one worth pausing on. The query is correct — code review
 sees a proper `WHERE tenant_id = …`, and a single-tenant test suite passes — but
@@ -128,6 +135,13 @@ The static engine parses with the standard library's `ast`. It never imports or
 executes the code under analysis
 ([ADR-0005](docs/adr/0005-stdlib-ast-over-tree-sitter.md)).
 
+Two adapters ship — `python_sqlalchemy` and `python_django` — and `adapter =
+"auto"` picks by looking at imports. Writing the second one is what showed that
+three of the six rules were never about an ORM at all: raw SQL, cache keys and
+job payloads are patterns in Python, so they moved to `static/rules.py` where
+both adapters read them
+([ADR-0012](docs/adr/0012-the-adapter-seam.md)).
+
 ## Why not the tools you already have
 
 Adjacent tools exist and this one is not a replacement for any of them.
@@ -170,6 +184,28 @@ Put the canary in a field the API actually returns — a title, name, or
 description. Create **at least two records per kind**: the harness keeps its
 control reads and its attack reads on different records
 ([ADR-0008](docs/adr/0008-differential-attribution.md)).
+
+Two details decide whether the rest of the run works, and neither raises
+anything when wrong:
+
+- **`tenant_id` is the tenant as it appears in a URL path.** The prober
+  substitutes it into tenant path parameters, so for
+  `/api/v1/accounts/{account_id}/…` it is the account id and for
+  `/admin/realms/{realm}/…` the realm *name*. Wrong value, and the canonical
+  cross-tenant test never runs.
+- **`kind` must equal the endpoint's resource segment**, lowercase and
+  singular: `/api/invoices/{id}` wants `kind="invoice"`. Wrong value, and every
+  endpoint quietly falls back to trying a few ids blindly. The run says so when
+  no kind matches anything.
+
+A nested record declares the parents that lead to it —
+`{"kind": "row", "id": "1", "path": {"table_id": "38"}}` — because a row cannot
+be addressed from a row id alone. `[tenancy] path_literals` pins a slot that
+names a *type* rather than an object, as Squidex's `{schema}` does.
+
+`SeederClient` is optional and removes the call/check/decode dance every real
+seeder wrote by hand; its value is the failure messages, which name the
+request, the expected status, and what the application actually said.
 
 Then point at it:
 
@@ -232,6 +268,38 @@ response body.
 
 Exit codes: `0` clean · `1` findings at or above `fail-on` · `2` usage or
 config error · `3` **run INVALID**, positive controls failed.
+
+## The second run
+
+Every other view answers "what did this run find?". A team running it weekly
+needs the other question, and an application that still holds and one the
+harness no longer reaches both report no findings.
+
+```bash
+tenanttrace diff .tenanttrace/myapp/runs/<earlier> .tenanttrace/myapp/runs/<later> \
+  --fail-on-regression
+```
+
+It reports three regressions — an endpoint no longer tested, an endpoint whose
+every attempt is now inconclusive, and fewer refusals than before — and can
+fail a build on coverage alone, with no new finding. Only `ENFORCED` counts as
+coverage: an endpoint that was visited but never decided was not tested. It
+refuses to compare against an `INVALID` run, because comparing with a run that
+never happened is how a regression gets explained away.
+
+## While you write
+
+```bash
+git clone https://github.com/halilibrahimd27/tenant-trace
+claude plugin marketplace add ./tenant-trace
+claude plugin install tenant-trace@tenant-trace
+```
+
+A [Claude Code plugin](plugin/README.md) with two surfaces. A hook runs the
+static engine over each Python file you edit and reports queries with no
+visible tenant predicate — it never blocks, never probes, and stays quiet when
+it has nothing to say. A skill carries how to run a real audit, why `INVALID`
+is not a clean result, and what "refused" counts.
 
 ## What it will not find
 
