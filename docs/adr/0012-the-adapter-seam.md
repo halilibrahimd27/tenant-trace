@@ -1,6 +1,6 @@
 # ADR-0012 — The language/framework seam must be separated before a second adapter
 
-- **Status:** accepted
+- **Status:** accepted, implemented
 - **Date:** 2026-07-27
 
 ## Context
@@ -94,3 +94,32 @@ than stretching.
 **Rejected.** Writing the Django adapter first and deduplicating afterwards.
 The duplicate would be the reference for anyone reading the code in between,
 and "we will extract it later" is how six rules become twelve permanently.
+
+## Outcome
+
+Done in three commits, each gated on its own.
+
+The seam turned out to be one layer deeper than this record first claimed. After
+the three rules moved, the Django adapter still needed `scopes`, `scope_nodes`,
+`parent_map`, `iter_definitions`, `dedupe` and `finding` — walking a Python file
+into analysable units, collapsing duplicate hits, rendering a `Hit` as a
+`Finding`. None of that mentions an ORM either, and it was missed while
+deliberately looking for exactly this. Worth recording: a seam is not obvious
+even to someone hunting for it, which is the argument for a second
+implementation rather than a careful reading.
+
+`python_sqlalchemy` went from 590 lines to 478, and what remains is genuinely
+about SQLAlchemy. `python_django` is 340 lines, of which the ORM-specific rules
+are about half: manager queries, the `get_object_or_404` shortcut, `.raw()` and
+`.extra()`, and `_base_manager` as the scope bypass.
+
+The Protocol itself needed no change, which is the one part of the original
+design that held.
+
+And the defect the exercise was meant to surface surfaced immediately, in the
+new adapter: `detect_scoping` read the adapter's ten column names while the
+rules read the config's four, so `filter(organization__slug=…)` — correctly
+scoped — was reported. The same mismatch had already been fixed once in
+`python_sqlalchemy` without the general lesson being drawn. `_columns()` now
+widens the configured list with the adapter's own, and the operator's
+configuration still outranks the guess.

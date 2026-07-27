@@ -15,6 +15,15 @@ from __future__ import annotations
 import ast
 from collections.abc import Callable, Sequence
 
+from tenanttrace.static.adapters.python_django import (
+    ADAPTER_NAME as DJANGO_NAME,
+)
+from tenanttrace.static.adapters.python_django import (
+    PythonDjangoAdapter,
+)
+from tenanttrace.static.adapters.python_django import (
+    _sniff as _sniff_python_django,
+)
 from tenanttrace.static.adapters.python_sqlalchemy import ADAPTER_NAME, PythonSQLAlchemyAdapter
 from tenanttrace.static.base import LanguageAdapter, ParsedFile
 
@@ -63,8 +72,18 @@ def _sniff_python_sqlalchemy(files: Sequence[ParsedFile]) -> float:
     return 0.4 if python_files else 0.0
 
 
-_FACTORIES: dict[str, AdapterFactory] = {ADAPTER_NAME: PythonSQLAlchemyAdapter}
-_SNIFFERS: dict[str, Sniffer] = {ADAPTER_NAME: _sniff_python_sqlalchemy}
+_FACTORIES: dict[str, AdapterFactory] = {
+    ADAPTER_NAME: PythonSQLAlchemyAdapter,
+    DJANGO_NAME: PythonDjangoAdapter,
+}
+# Django scores 1.0 on an explicit import and 0.0 otherwise, so a project
+# with both loses to whichever it imports — and the SQLAlchemy sniffer
+# floors at 0.4 for any Python tree, which is the right tie-break: its
+# rules are mostly ORM-independent.
+_SNIFFERS: dict[str, Sniffer] = {
+    ADAPTER_NAME: _sniff_python_sqlalchemy,
+    DJANGO_NAME: _sniff_python_django,
+}
 
 
 def register(name: str, factory: AdapterFactory, sniffer: Sniffer | None = None) -> None:
