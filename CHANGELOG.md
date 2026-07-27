@@ -1,55 +1,69 @@
 # Changelog
 
-Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+## 0.2.0 — 2026-07-27
 
-## [Unreleased]
+Six real open-source applications were seeded and audited end to end —
+Chatwoot, Baserow, Squidex, EspoCRM, Keycloak and Teable, on six backend
+stacks. Every agent doing it was also a first-time user, and reported what
+broke. Most of this release is what they found.
 
-### Added
+### The refused count was not true
 
-**Dynamic prober** — the product.
-- Canary-based leak oracle with an exact verdict table; `inconclusive` is a
-  first-class outcome and never a silent pass (ADR-0003).
-- Positive controls before every run. A tenant that cannot read its own seeded
-  data makes the run `INVALID` (exit code 3), never "clean".
-- Six attack modules: `idor`, `listing`, `aggregate`, `param_override`,
-  `cache`, `mass_assign`. Both directions (A→B and B→A) are probed.
-- `SyncASGITransport` — audit a Python ASGI application in-process, with no
-  server, port, or container. Usable from your own pytest suite (ADR-0004).
-- Safety rails: host allowlist, `--i-have-authorization` for non-loopback
-  targets, read-only by default, no redirect following, a rate limit shared
-  across both tenant sessions, and credentials redacted where the record is
-  created rather than where it is displayed.
-- Run artifacts under `.tenanttrace/runs/<ts>/`, created mode `0700`.
+The number a clean verdict rests on — *"N attempts refused"* — was inflated
+four separate ways, and one artifact said *"168 attempts … the application
+refused them"* beside a tile reading `26`.
 
-**Static engine** — hypotheses only, never a standalone verdict.
-- Parses with the stdlib `ast`; never imports or executes the code under
-  analysis (ADR-0005).
-- Intraprocedural reaching-definitions, scoping-mode detection (manual vs
-  global), and a Python/SQLAlchemy adapter behind a `LanguageAdapter` protocol.
+- Verdicts count `ENFORCED`, not every result. Throttled, redirected and
+  skipped attempts are reported as undecided, on purpose (ADR-0010).
+- HTTP 429 is never a refusal; past half the attempts throttled, the run is
+  `INVALID`.
+- A 404 from a route that answers 404 for the caller's own record too is
+  absence, not enforcement.
+- A request that addressed no record we know about — an id of the wrong kind,
+  or several slots sharing one — proves nothing either way.
 
-**Reporting and CI.**
-- JSON, Markdown, and self-contained HTML reports. A report from an `INVALID`
-  run opens by saying so.
-- Baseline with fingerprints that survive re-seeding, endpoint reordering,
-  parameter renames, and line-number churn; stale entries are reported so a
-  baseline cannot rot into blanket suppression (ADR-0007).
-- `action.yml` composite GitHub Action with a severity gate and a PR comment
-  that never prints canary values or tokens.
-- `docker compose up -d` boots both fixture applications, audits them over real
-  HTTP with a real Redis, and serves the reports on `:8088`.
+### The gate between VALID and INVALID
 
-**CLI.** `init`, `probe`, `scan`, `report`, `metrics`, `demo`,
-`validate-config`, `version`.
+- The positive control was the only caller that did not pass the tenant, so on
+  an application carrying its tenant in a path segment every control went to a
+  wrong URL. On Keycloak, 418 of 420 control requests 404'd.
+- Controls are re-asserted when the run finishes: a long audit outlives
+  short-lived tokens, and the second half was being refused for the wrong
+  reason.
+- The seeder gets its own HTTP client. A shared cookie jar made the prober
+  attack as the seeder's user.
+- `--dry-run` writes no artifact. It used to write a `VALID` report with no
+  controls, which renders as an audit that passed.
 
-**Fixtures and measurement.** Two FastAPI applications sharing one schema — one
-with six deliberate holes, one correctly isolated plus a legitimate
-cross-tenant admin endpoint — with `labels.yaml` as the answer key and a
-precision/recall gate wired into `make verify`. Currently 100% recall with zero
-false positives.
+### New
 
-### Decisions
-ADR-0001 MADR · ADR-0002 dynamic-first · ADR-0003 canary oracle ·
-ADR-0004 hermetic in-process auditing · ADR-0005 stdlib `ast` over tree-sitter ·
-ADR-0006 seeder owns credentials · ADR-0007 baseline fingerprints ·
-ADR-0008 differential attribution.
+- `tenanttrace diff` — what a run *stopped* proving, with
+  `--fail-on-regression` to gate a build on coverage alone.
+- A Claude Code plugin: a hook that flags unscoped queries as you write, and a
+  skill for running a real audit.
+- A second static adapter, `python_django`, and `adapter = "auto"`.
+- `Category.PUBLIC_ENDPOINT` — if an anonymous request gets the same data,
+  tenant scoping is not the control that failed (ADR-0011).
+- `[tenancy] path_params` and `path_literals`, and per-record `path` values:
+  endpoint shapes that were unprobeable now probe.
+- `[target] spec_headers` for APIs that serve their spec only to an admin.
+- `SeederClient`, whose value is failure messages that name the request.
+- The report states its scope, the evidence signals it could use, and maps
+  findings to CWE / OWASP / ASVS. It prints.
+
+### Security
+
+- Credential-looking values are stripped from request and response **bodies**,
+  not only headers, in every mode. A `/profile` endpoint echoing the caller's
+  own token wrote it into the artifact CI uploads.
+
+### Internal
+
+- The language/framework seam is separated: rules that are about Python rather
+  than an ORM live in `static/rules.py` (ADR-0012).
+- `max_endpoints` thins across resources instead of cutting a sorted path list,
+  which used to delete whole subsystems silently.
+
+## 0.1.0
+
+First release.

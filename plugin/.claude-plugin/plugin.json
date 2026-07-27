@@ -2,7 +2,7 @@
   "name": "tenant-trace",
   "displayName": "TenantTrace",
   "description": "Prove whether tenant A can reach tenant B's data. Flags unscoped queries as you write them, and runs a full cross-tenant audit on demand.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "license": "MIT",
   "homepage": "https://halilibrahimd27.github.io/tenant-trace/",
   "repository": "https://github.com/halilibrahimd27/tenant-trace",
