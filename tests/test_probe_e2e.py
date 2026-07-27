@@ -336,3 +336,25 @@ def test_the_anonymous_check_costs_nothing_on_a_clean_run(  # type: ignore[no-un
     """It is only asked when there is a leak to explain."""
     report = _audit(safe_config, safe_transport)
     assert not [f for f in report.findings if f.category is Category.PUBLIC_ENDPOINT]
+
+
+def test_a_404_from_a_live_route_is_still_enforcement(safe_report) -> None:  # type: ignore[no-untyped-def]
+    """The tool tells applications to answer 404 rather than 403.
+
+    Reading every 404 as absence would punish exactly the applications that
+    took the advice, so the reclassification only fires when the endpoint 404s
+    for the caller's own record too.
+    """
+    refused = [r for r in safe_report.results if r.verdict is Verdict.ENFORCED]
+    assert refused, "the safe fixture must still prove it refuses things"
+    assert not any("absence, not enforcement" in r.detail for r in refused)
+
+
+def test_the_route_check_runs_after_every_attack(vulnerable_report) -> None:  # type: ignore[no-untyped-def]
+    """Asking mid-attack warms a tenant-less cache and hides the cache leak.
+
+    Two attempts to put this check inside the attack loop were caught here
+    within minutes; this test is what caught them.
+    """
+    categories = {f.category for f in vulnerable_report.findings}
+    assert Category.CACHE_KEY_LEAK in categories

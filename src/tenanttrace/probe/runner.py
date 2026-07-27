@@ -20,7 +20,7 @@ and turns "we did not observe a leak" into a stronger claim.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -50,6 +50,7 @@ from tenanttrace.core.models import (
     utcnow,
 )
 from tenanttrace.core.severity import remediation_for, severity_for, tags_for, title_for
+from tenanttrace.core.text import count
 from tenanttrace.probe.attacks import AttackContext, build_attacks
 from tenanttrace.probe.attacks.base import build_path, candidate_ids, resource_name
 from tenanttrace.probe.oracle import TenantOracle, scan_for_markers
@@ -309,6 +310,18 @@ def run_probe(config: Config, options: ProbeOptions | None = None) -> ProbeOutco
                 "and count as neither refused nor leaked"
             )
 
+        # A 404 from an endpoint that serves nothing is not a refusal. Done
+        # here, after every attack, so the reads it makes cannot warm a cache
+        # that a later attack depends on being cold (ADR-0008).
+        absent = _reclassify_absent_routes(
+            state.results, sessions, tenants, config.tenancy.tenant_path_params()
+        )
+        if absent:
+            state.errors.append(
+                f"{count(absent, 'endpoint')} answered 404 for their own tenant too; "
+                "those attempts were recorded as inconclusive rather than refused"
+            )
+
         findings = _findings_from(state.results, config)
 
     except _Abort:
@@ -465,6 +478,77 @@ def _self_access_control(
 # --------------------------------------------------------------------------- #
 # Findings
 # --------------------------------------------------------------------------- #
+
+
+def _reclassify_absent_routes(
+    results: list[ProbeResult],
+    sessions: Mapping[TenantLabel, TenantSession],
+    tenants: Mapping[TenantLabel, TenantContext],
+    tenant_path_params: frozenset[str],
+) -> int:
+    """Downgrade 404s from endpoints that serve nothing to anyone.
+
+    A 404 is genuinely ambiguous, and this tool's own remediation is why: it
+    tells applications to answer 404 rather than 403 for another tenant's
+    object so the response does not confirm the id exists. Reading every 404 as
+    absence would punish exactly the applications that took the advice.
+
+    So each endpoint that produced a 404-based ENFORCED is asked once, with the
+    caller's **own** record: if that 404s too, the route serves nothing here and
+    the cross-tenant 404 was never evidence. Teable's
+    ``/api/space/{spaceId}/billing`` is not mounted in the community build and
+    404s for the space's own owner.
+
+    **This runs after every attack, and that placement is the design.** Asking
+    mid-attack means somebody reads an object they own, which populates a
+    tenant-less cache entry and hides the cache leak the next attack exists to
+    find — the side effect ADR-0008 was written about. Two attempts to put this
+    check inside the attack loop were caught by the fixture tests within
+    minutes; afterwards, warming a cache can affect nothing.
+
+    Errs towards keeping the enforcement claim: no usable id, or a request that
+    could not be made, leaves the result alone.
+    """
+    suspect = {
+        r.endpoint.key: r.endpoint
+        for r in results
+        if r.verdict is Verdict.ENFORCED and r.evidence.response_status == 404
+    }
+    if not suspect:
+        return 0
+
+    label = TenantLabel.A
+    session, tenant = sessions[label], tenants[label]
+    absent: set[str] = set()
+    for key, endpoint in suspect.items():
+        own = candidate_ids(endpoint, tenant)
+        if not own:
+            continue
+        path = build_path(endpoint, own[0], tenant=tenant, tenant_params=tenant_path_params)
+        probe = session.request(endpoint.method, path, attack="route-check")
+        if probe.transport_error is None and probe.status == 404:
+            absent.add(key)
+
+    if not absent:
+        return 0
+
+    for index, result in enumerate(results):
+        if (
+            result.endpoint.key in absent
+            and result.verdict is Verdict.ENFORCED
+            and result.evidence.response_status == 404
+        ):
+            results[index] = result.model_copy(
+                update={
+                    "verdict": Verdict.INCONCLUSIVE,
+                    "detail": (
+                        "target answered 404, but this endpoint answers 404 for the "
+                        "caller's own record too, so the route serves nothing here; "
+                        "this is absence, not enforcement"
+                    ),
+                }
+            )
+    return len(absent)
 
 
 def _findings_from(results: Sequence[ProbeResult], config: Config) -> list[Finding]:
