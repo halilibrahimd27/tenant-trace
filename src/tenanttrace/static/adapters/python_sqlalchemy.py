@@ -29,14 +29,18 @@ from __future__ import annotations
 import ast
 import re
 from collections.abc import Iterable, Iterator, Sequence
-from dataclasses import dataclass, field
 
 from tenanttrace.core.models import Category, Confidence, Engine, Evidence, Finding, ScopingMode
 from tenanttrace.core.severity import remediation_for, severity_for, tags_for, title_for
-from tenanttrace.static.base import ParsedFile, ScopingSignal, StaticContext
+from tenanttrace.static.base import (
+    Hit,
+    ParsedFile,
+    Scope,
+    ScopingSignal,
+    StaticContext,
+)
 from tenanttrace.static.dataflow import (
     Definition,
-    FunctionNode,
     all_definitions,
     attribute_tail,
     definitions_reaching,
@@ -177,32 +181,6 @@ _ASSUME_JOB_PAYLOAD = (
 # --------------------------------------------------------------------------- #
 # Internal records
 # --------------------------------------------------------------------------- #
-@dataclass(frozen=True, slots=True)
-class _Hit:
-    """A rule fired. Becomes a Finding once the location is known."""
-
-    category: Category
-    symbol: str
-    line: int
-    assumption: str
-    note: str
-    model: str = ""
-    # Findings sharing a dedupe key are one defect reported once (a cache-key
-    # template used by both a reader and a writer, say).
-    dedupe_key: str = ""
-    # Higher wins inside a dedupe group: report the write, not the read.
-    priority: int = 0
-
-
-@dataclass(frozen=True, slots=True)
-class _Scope:
-    """One analysable unit: a module body, a class body, or a function body."""
-
-    symbol: str
-    root: ast.AST
-    fn: FunctionNode | None = None
-    definitions: dict[str, set[Definition]] = field(default_factory=dict)
-    tainted: frozenset[str] = frozenset()
 
 
 # --------------------------------------------------------------------------- #
@@ -336,7 +314,7 @@ class PythonSQLAlchemyAdapter:
     def find_findings(self, file: ParsedFile, ctx: StaticContext) -> Iterable[Finding]:
         """Run every rule that applies in ``ctx.mode`` over one file."""
         parents = _parent_map(file.tree)
-        hits: list[_Hit] = []
+        hits: list[Hit] = []
 
         for scope in self._scopes(file, ctx):
             nodes = tuple(_scope_nodes(scope.root))
@@ -355,12 +333,12 @@ class PythonSQLAlchemyAdapter:
         return [self._finding(hit, file, ctx) for hit in _dedupe(hits)]
 
     # ------------------------------------------------------------------ scopes
-    def _scopes(self, file: ParsedFile, ctx: StaticContext) -> Iterator[_Scope]:
+    def _scopes(self, file: ParsedFile, ctx: StaticContext) -> Iterator[Scope]:
         """Yield the module scope, then every function and class body."""
-        yield _Scope(_MODULE_SYMBOL, file.tree)
+        yield Scope(_MODULE_SYMBOL, file.tree)
         for node, symbol in _iter_definitions(file.tree):
             if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-                yield _Scope(
+                yield Scope(
                     symbol,
                     node,
                     fn=node,
@@ -375,12 +353,12 @@ class PythonSQLAlchemyAdapter:
                     ),
                 )
             elif isinstance(node, ast.ClassDef):
-                yield _Scope(symbol, node)
+                yield Scope(symbol, node)
 
     # ---------------------------------------------------------------- raw SQL
-    def _raw_sql(self, scope: _Scope, nodes: Sequence[ast.AST], ctx: StaticContext) -> list[_Hit]:
+    def _raw_sql(self, scope: Scope, nodes: Sequence[ast.AST], ctx: StaticContext) -> list[Hit]:
         """``text(...)`` that binds no tenant parameter — RAW_SQL_ESCAPE."""
-        hits: list[_Hit] = []
+        hits: list[Hit] = []
         for node in nodes:
             if not isinstance(node, ast.Call) or _tail(node.func) not in _RAW_SQL_FUNCS:
                 continue
@@ -402,7 +380,7 @@ class PythonSQLAlchemyAdapter:
             ):
                 continue
             hits.append(
-                _Hit(
+                Hit(
                     category=Category.RAW_SQL_ESCAPE,
                     symbol=scope.symbol,
                     line=node.lineno,
@@ -416,11 +394,9 @@ class PythonSQLAlchemyAdapter:
         return hits
 
     # ------------------------------------------------------------- cache keys
-    def _cache_keys(
-        self, scope: _Scope, nodes: Sequence[ast.AST], ctx: StaticContext
-    ) -> list[_Hit]:
+    def _cache_keys(self, scope: Scope, nodes: Sequence[ast.AST], ctx: StaticContext) -> list[Hit]:
         """Cache keys carrying an id but no tenant — TENANTLESS_CACHE_KEY."""
-        hits: list[_Hit] = []
+        hits: list[Hit] = []
         for node in nodes:
             if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
                 continue
@@ -448,7 +424,7 @@ class PythonSQLAlchemyAdapter:
 
             template = _static_string(candidates[0]) or "<dynamic>"
             hits.append(
-                _Hit(
+                Hit(
                     category=Category.TENANTLESS_CACHE_KEY,
                     symbol=scope.symbol,
                     line=node.lineno,
@@ -465,8 +441,8 @@ class PythonSQLAlchemyAdapter:
 
     # ----------------------------------------------------------- job payloads
     def _job_payloads(
-        self, scope: _Scope, nodes: Sequence[ast.AST], ctx: StaticContext
-    ) -> list[_Hit]:
+        self, scope: Scope, nodes: Sequence[ast.AST], ctx: StaticContext
+    ) -> list[Hit]:
         """Worker payloads with no tenant key — TENANTLESS_JOB_PAYLOAD."""
         dispatches = [
             node
@@ -490,7 +466,7 @@ class PythonSQLAlchemyAdapter:
                 continue
             keys = ", ".join(_dict_key_names(payload)) or "<none>"
             return [
-                _Hit(
+                Hit(
                     category=Category.TENANTLESS_JOB_PAYLOAD,
                     symbol=scope.symbol,
                     line=payload.lineno,
@@ -506,13 +482,13 @@ class PythonSQLAlchemyAdapter:
     # -------------------------------------------------------- mode A: filters
     def _missing_filter(
         self,
-        scope: _Scope,
+        scope: Scope,
         nodes: Sequence[ast.AST],
         ctx: StaticContext,
         parents: dict[int, ast.AST],
-    ) -> list[_Hit]:
+    ) -> list[Hit]:
         """Reads on a scoped model with no tenant predicate (manual mode only)."""
-        hits: list[_Hit] = []
+        hits: list[Hit] = []
         for node in nodes:
             if not isinstance(node, ast.Call) or not _is_query_root(node, ctx):
                 continue
@@ -545,7 +521,7 @@ class PythonSQLAlchemyAdapter:
             if _has_tenant_predicate(closure, ctx.tenant_columns, scope.tainted):
                 continue
             hits.append(
-                _Hit(
+                Hit(
                     category=Category.MISSING_TENANT_FILTER,
                     symbol=scope.symbol,
                     line=node.lineno,
@@ -561,9 +537,9 @@ class PythonSQLAlchemyAdapter:
         return hits
 
     # -------------------------------------------------------- mode B: escapes
-    def _scope_bypass(self, scope: _Scope, nodes: Sequence[ast.AST]) -> list[_Hit]:
+    def _scope_bypass(self, scope: Scope, nodes: Sequence[ast.AST]) -> list[Hit]:
         """Explicit disabling of the global scope (global mode only)."""
-        hits: list[_Hit] = []
+        hits: list[Hit] = []
         for node in nodes:
             if not isinstance(node, ast.Call):
                 continue
@@ -574,7 +550,7 @@ class PythonSQLAlchemyAdapter:
             trigger = next((token for token in _BYPASS_TOKENS if token in called), None)
             if trigger is not None:
                 hits.append(
-                    _Hit(
+                    Hit(
                         category=Category.SCOPE_BYPASS_FLAG,
                         symbol=scope.symbol,
                         line=node.lineno,
@@ -586,7 +562,7 @@ class PythonSQLAlchemyAdapter:
             for keyword in node.keywords:
                 if keyword.arg in _BYPASS_KEYWORDS and _may_be_truthy(keyword.value):
                     hits.append(
-                        _Hit(
+                        Hit(
                             category=Category.SCOPE_BYPASS_FLAG,
                             symbol=scope.symbol,
                             line=node.lineno,
@@ -596,14 +572,14 @@ class PythonSQLAlchemyAdapter:
                     )
         return hits
 
-    def _unscoped_models(self, file: ParsedFile, ctx: StaticContext) -> list[_Hit]:
+    def _unscoped_models(self, file: ParsedFile, ctx: StaticContext) -> list[Hit]:
         """Tenant-owned models outside the scoping base class (global mode only)."""
         if not ctx.scope_mixins:
             # Without a known mixin there is nothing to be missing from, and
             # flagging every model would bury the report.
             return []
         mixins = set(ctx.scope_mixins)
-        hits: list[_Hit] = []
+        hits: list[Hit] = []
         for node, symbol in _iter_definitions(file.tree):
             if not isinstance(node, ast.ClassDef):
                 continue
@@ -616,7 +592,7 @@ class PythonSQLAlchemyAdapter:
             if not _carries_tenant_column(node, ctx):
                 continue
             hits.append(
-                _Hit(
+                Hit(
                     category=Category.UNSCOPED_MODEL,
                     symbol=symbol,
                     line=node.lineno,
@@ -631,7 +607,7 @@ class PythonSQLAlchemyAdapter:
         return hits
 
     # ----------------------------------------------------------------- output
-    def _finding(self, hit: _Hit, file: ParsedFile, ctx: StaticContext) -> Finding:
+    def _finding(self, hit: Hit, file: ParsedFile, ctx: StaticContext) -> Finding:
         """Turn a rule hit into a suspected finding anchored to file::symbol."""
         location = file.symbol_location(hit.symbol)
         return Finding(
@@ -668,7 +644,7 @@ def _truncate(text: str, limit: int) -> str:
     return text if len(text) <= limit else f"{text[: limit - 1]}…"
 
 
-def _dedupe(hits: Sequence[_Hit]) -> list[_Hit]:
+def _dedupe(hits: Sequence[Hit]) -> list[Hit]:
     """Collapse duplicates: one defect, one finding.
 
     Two passes. First, hits sharing an explicit ``dedupe_key`` (the same cache
@@ -677,8 +653,8 @@ def _dedupe(hits: Sequence[_Hit]) -> list[_Hit]:
     category per symbol, since a symbol is the finest granularity a fingerprint
     records — three unscoped aggregates in one handler are one thing to fix.
     """
-    by_key: dict[str, _Hit] = {}
-    keyless: list[_Hit] = []
+    by_key: dict[str, Hit] = {}
+    keyless: list[Hit] = []
     for hit in hits:
         if not hit.dedupe_key:
             keyless.append(hit)
@@ -687,7 +663,7 @@ def _dedupe(hits: Sequence[_Hit]) -> list[_Hit]:
         if current is None or (hit.priority, -hit.line) > (current.priority, -current.line):
             by_key[hit.dedupe_key] = hit
 
-    by_symbol: dict[tuple[Category, str], _Hit] = {}
+    by_symbol: dict[tuple[Category, str], Hit] = {}
     for hit in sorted([*keyless, *by_key.values()], key=lambda h: (h.line, h.symbol)):
         by_symbol.setdefault((hit.category, hit.symbol), hit)
     return sorted(by_symbol.values(), key=lambda h: (h.symbol, h.line))

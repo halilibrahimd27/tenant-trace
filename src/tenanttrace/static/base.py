@@ -25,18 +25,21 @@ from __future__ import annotations
 
 import ast
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from tenanttrace.core.models import Finding, ScopingMode
+from tenanttrace.core.models import Category, Finding, ScopingMode
+from tenanttrace.static.dataflow import Definition, FunctionNode
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle avoidance only
     from tenanttrace.core.config import Config
 
 __all__ = [
+    "Hit",
     "LanguageAdapter",
     "ParsedFile",
+    "Scope",
     "ScopingSignal",
     "StaticContext",
 ]
@@ -161,6 +164,39 @@ class StaticContext:
             mode=mode,
             scope_mixins=tuple(scope_mixins),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class Hit:
+    """A rule fired. Becomes a Finding once the location is known.
+
+    Shared rather than adapter-private because the rules in
+    :mod:`tenanttrace.static.rules` return these, and every adapter consumes
+    them (ADR-0012).
+    """
+
+    category: Category
+    symbol: str
+    line: int
+    assumption: str
+    note: str
+    model: str = ""
+    # Findings sharing a dedupe key are one defect reported once (a cache-key
+    # template used by both a reader and a writer, say).
+    dedupe_key: str = ""
+    # Higher wins inside a dedupe group: report the write, not the read.
+    priority: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class Scope:
+    """One analysable unit: a module body, a class body, or a function body."""
+
+    symbol: str
+    root: ast.AST
+    fn: FunctionNode | None = None
+    definitions: dict[str, set[Definition]] = field(default_factory=dict)
+    tainted: frozenset[str] = frozenset()
 
 
 @runtime_checkable
