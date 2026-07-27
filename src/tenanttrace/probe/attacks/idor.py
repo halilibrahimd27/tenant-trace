@@ -74,7 +74,12 @@ class IdorAttack:
                     path_values=ids.path_for(identifier),
                     literals=ctx.path_literals,
                 )
-                exchange = ctx.actor.request(endpoint.method, path, attack=self.name.value)
+                exchange = ctx.actor.request(
+                    endpoint.method,
+                    path,
+                    attack=self.name.value,
+                    id_source="kind-matched" if ids.matched_kind else "blind",
+                )
                 decision = ctx.oracle.judge(
                     exchange.facts(),
                     mode=AccessMode.OBJECT,

@@ -74,7 +74,12 @@ class CacheAttack:
             )
 
             # Step 1 — cold. A leak here is an IDOR, not a cache bug.
-            cold = ctx.actor.request(endpoint.method, path, attack=self.name.value)
+            cold = ctx.actor.request(
+                endpoint.method,
+                path,
+                attack=self.name.value,
+                id_source="kind-matched" if ids.matched_kind else "blind",
+            )
             cold_decision = ctx.oracle.judge(
                 cold.facts(),
                 mode=AccessMode.OBJECT,
@@ -91,7 +96,12 @@ class CacheAttack:
             # Step 2 — the victim reads its own object. This is an ordinary,
             # authorised request; it is the application that turns it into a
             # shared cache entry.
-            warm = ctx.victim.request(endpoint.method, path, attack=self.name.value)
+            warm = ctx.victim.request(
+                endpoint.method,
+                path,
+                attack=self.name.value,
+                id_source="kind-matched" if ids.matched_kind else "blind",
+            )
             if not warm.ok:
                 # Nothing was cached, so step 3 could not distinguish a cache
                 # leak from an ordinary refusal. On one real target this ended
@@ -108,7 +118,12 @@ class CacheAttack:
                 continue
 
             # Step 3 — the same request that was refused in step 1.
-            hot = ctx.actor.request(endpoint.method, path, attack=self.name.value)
+            hot = ctx.actor.request(
+                endpoint.method,
+                path,
+                attack=self.name.value,
+                id_source="kind-matched" if ids.matched_kind else "blind",
+            )
             hot_decision = ctx.oracle.judge(
                 hot.facts(),
                 mode=AccessMode.OBJECT,

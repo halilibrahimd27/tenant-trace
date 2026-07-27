@@ -251,3 +251,28 @@ def test_config_is_frozen(tmp_path: Path) -> None:
     config: Config = load_config(write(tmp_path, MINIMAL))
     with pytest.raises(Exception):  # noqa: B017,PT011 - pydantic raises its own error type
         config.target.base_url = "http://evil.example"  # type: ignore[misc]
+
+
+def test_the_spec_request_can_carry_a_credential(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    """Some applications serve their OpenAPI document only to an authenticated
+    admin. Without this the inventory comes back empty and the run reports
+    nothing rather than saying it could not look."""
+    monkeypatch.setenv("TT_SPEC_TOKEN", "s3cret")
+    config_file = tmp_path / "t.toml"
+    config_file.write_text(
+        '[target]\nbase_url = "http://127.0.0.1:8000"\n'
+        'spec_headers = { Authorization = "TT_SPEC_TOKEN" }\n',
+        encoding="utf-8",
+    )
+    assert load_config(config_file).target.spec_auth() == {"Authorization": "s3cret"}
+
+
+def test_a_spec_credential_names_an_env_var_not_a_secret(tmp_path: Path) -> None:
+    """A config file gets committed; a token in one is a token in the repo."""
+    config_file = tmp_path / "t.toml"
+    config_file.write_text(
+        '[target]\nbase_url = "http://127.0.0.1:8000"\n'
+        'spec_headers = { Authorization = "TT_UNSET_VAR" }\n',
+        encoding="utf-8",
+    )
+    assert load_config(config_file).target.spec_auth() == {}

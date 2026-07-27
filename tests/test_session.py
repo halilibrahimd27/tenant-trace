@@ -303,3 +303,24 @@ def test_asgi_transport_state_persists_across_requests() -> None:
         assert client.get("/x").text == "1"
         assert client.get("/x").text == "2"
         client.close()
+
+
+def test_an_exchange_records_why_its_identifier_was_chosen() -> None:
+    """Whether an id matched the endpoint's resource or was a guess decides
+    whether a 404 is evidence — and reading it back used to require
+    monkey-patching candidate_ids and re-running the audit."""
+    from tenanttrace.probe.session import Exchange
+
+    exchange = Exchange(
+        label=TenantLabel.A,
+        method=HttpMethod.GET,
+        url="http://x/api/invoices/1",
+        status=404,
+        request_headers={},
+        request_body=None,
+        response_text="",
+        elapsed_ms=1.0,
+        attack="idor",
+        id_source="blind",
+    )
+    assert exchange.id_source == "blind"

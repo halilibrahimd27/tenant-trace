@@ -718,17 +718,27 @@ class _Fetched:
     source: str
 
 
-def _fetch(spec_path: str, client: httpx.Client | None) -> _Fetched:
+def _fetch(
+    spec_path: str,
+    client: httpx.Client | None,
+    headers: Mapping[str, str] | None = None,
+) -> _Fetched:
     """Read a spec from a URL (through the probe's own client) or from disk."""
     if spec_path.startswith(("http://", "https://")):
         if client is None:
             msg = "an HTTP client is required to fetch a spec over the network"
             raise SpecError(msg)
         try:
-            response = client.get(spec_path)
+            response = client.get(spec_path, headers=dict(headers or {}))
             response.raise_for_status()
         except httpx.HTTPError as exc:
-            msg = f"could not fetch the API description from {spec_path}: {exc}"
+            hint = (
+                ""
+                if headers
+                else " If it is served only to an authenticated admin, set "
+                "[target] spec_headers."
+            )
+            msg = f"could not fetch the API description from {spec_path}: {exc}.{hint}"
             raise SpecError(msg) from exc
         try:
             return _Fetched(response.json(), spec_path)
@@ -759,7 +769,7 @@ def load_inventory(config: Config, client: httpx.Client | None = None) -> Endpoi
             msg = '[target] spec_path is required unless spec = "openapi"'
             raise SpecError(msg)
 
-    fetched = _fetch(spec_path, client)
+    fetched = _fetch(spec_path, client, config.target.spec_auth())
     kind = config.target.spec
     if kind == "openapi":
         inventory = parse_openapi(fetched.document, source=fetched.source)

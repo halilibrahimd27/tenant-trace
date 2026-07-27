@@ -91,6 +91,7 @@ class RunRecorder:
             "ts": utcnow().isoformat(),
             "tenant": exchange.label.value,
             "attack": exchange.attack,
+            "id_source": exchange.id_source,
             "method": exchange.method.value,
             "url": exchange.url,
             "status": exchange.status,

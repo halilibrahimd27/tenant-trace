@@ -81,6 +81,12 @@ class Exchange:
     elapsed_ms: float
     transport_error: str | None = None
     attack: str = ""
+    # Why this identifier was chosen: "kind-matched" when a seeded record of
+    # this endpoint's resource was used, "blind" when none matched and the
+    # prober guessed. Recorded because the difference decides whether a 404 is
+    # evidence, and reading it back required monkey-patching candidate_ids and
+    # re-running the audit.
+    id_source: str = ""
 
     @property
     def ok(self) -> bool:
@@ -221,6 +227,7 @@ class TenantSession:
         params: Mapping[str, Any] | None = None,
         json_body: Any | None = None,
         attack: str = "",
+        id_source: str = "",
     ) -> Exchange:
         """Send one request and record it, whatever happens.
 
@@ -269,6 +276,7 @@ class TenantSession:
             elapsed_ms=elapsed_ms,
             transport_error=error,
             attack=attack,
+            id_source=id_source,
         )
         self.exchanges.append(exchange)
         return exchange

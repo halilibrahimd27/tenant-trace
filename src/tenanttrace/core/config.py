@@ -65,6 +65,16 @@ class TargetConfig(_Section):
     allowed_hosts: tuple[str, ...] = ("127.0.0.1", "localhost")
     spec: Literal["openapi", "har", "postman", "routes"] = "openapi"
     spec_path: str | None = None
+    # Headers for the spec request itself, as {header: ENV_VAR_NAME}. Some
+    # applications only serve their OpenAPI document to an authenticated
+    # admin — EspoCRM does — and without this the inventory comes back empty
+    # and the run reports nothing rather than saying it could not look.
+    spec_headers: Mapping[str, str] = Field(default_factory=dict)
+
+    def spec_auth(self) -> dict[str, str]:
+        """The resolved headers for fetching the API description."""
+        return _env_headers(self.spec_headers)
+
     timeout_seconds: float = Field(default=10.0, gt=0, le=300)
 
     @field_validator("base_url")
@@ -239,6 +249,21 @@ class TenancyConfig(_Section):
         """
         names = self.path_params or self.columns()
         return frozenset(_normalise_param(n) for n in names)
+
+
+def _env_headers(spec: Mapping[str, str]) -> dict[str, str]:
+    """Resolve ``{"Authorization": "MY_TOKEN_ENV"}`` against the environment.
+
+    The value names an environment variable rather than holding the secret,
+    for the same reason the rest of the tool works that way: a config file gets
+    committed, and a token in one is a token in the repository.
+    """
+    resolved: dict[str, str] = {}
+    for name, env_var in spec.items():
+        value = os.environ.get(env_var, "")
+        if value:
+            resolved[name] = value
+    return resolved
 
 
 class ProbeConfig(_Section):
