@@ -322,3 +322,64 @@ def test_metrics_keeps_the_bracketed_setting_name(tmp_path: Path) -> None:
     result = runner.invoke(app, ["metrics", "--labels", "fixtures/labels.yaml"])
     assert result.exit_code == EXIT_OK, result.output
     assert "[probe] exclude_paths" in result.output
+
+
+# --------------------------------------------------------------------------- #
+# A dry run is a plan, not an audit
+# --------------------------------------------------------------------------- #
+
+
+def test_a_dry_run_records_nothing_at_all(tmp_path: Path) -> None:
+    """It used to leave invalid_reason unset, fall through to the VALID branch,
+    and write a report with no controls and no findings — which renders, in
+    every format, as an audit that passed. A plan has nothing to record."""
+    result = runner.invoke(
+        app,
+        [
+            "probe",
+            "--config",
+            "fixtures/tenanttrace.vulnerable.toml",
+            "--dry-run",
+            "--out",
+            str(tmp_path),
+        ],
+    )
+    assert result.exit_code == EXIT_OK, result.output
+    assert list(tmp_path.rglob("report.json")) == []
+
+
+def test_an_empty_plan_says_so_instead_of_looking_like_full_coverage() -> None:
+    result = runner.invoke(
+        app, ["probe", "--config", "fixtures/tenanttrace.vulnerable.toml", "--dry-run"]
+    )
+    assert "The plan is empty" in result.output
+    assert "[target]" in result.output
+
+
+def test_the_dry_run_estimate_counts_requests_not_endpoint_pairs() -> None:
+    """It under-reported a real run roughly six times, so it could not be used
+    to size a rate limit — the only thing a dry run is for."""
+    from tenanttrace.core.config import load_config
+    from tenanttrace.core.models import AttackName, Endpoint, HttpMethod
+    from tenanttrace.probe.runner import _plan
+    from tenanttrace.probe.spec import EndpointInventory
+
+    inventory = EndpointInventory(
+        endpoints=(
+            Endpoint(method=HttpMethod.GET, path="/api/invoices", path_params=()),
+            Endpoint(method=HttpMethod.GET, path="/api/invoices/{id}", path_params=("id",)),
+        )
+    )
+    plan = _plan(
+        load_config(Path("fixtures/tenanttrace.vulnerable.toml")),
+        inventory,
+        (AttackName.IDOR, AttackName.LISTING, AttackName.CACHE),
+    )
+    summary = plan[-1]
+    assert "requests:" in summary
+    assert "positive-control" in summary
+    # idor 3 ids + cache 3 steps on the object endpoint, listing 1 on the
+    # collection, all in both directions — never one line per (attack, endpoint).
+    assert "≈" in summary
+    total = int(summary.split("≈")[1].split()[0])
+    assert total >= (3 + 3) * 2 + 1 * 2

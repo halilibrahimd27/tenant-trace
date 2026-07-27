@@ -52,7 +52,12 @@ from tenanttrace.core.models import (
 from tenanttrace.core.severity import remediation_for, severity_for, tags_for, title_for
 from tenanttrace.core.text import count
 from tenanttrace.probe.attacks import AttackContext, build_attacks
-from tenanttrace.probe.attacks.base import build_path, candidate_ids, resource_name
+from tenanttrace.probe.attacks.base import (
+    MAX_BLIND_IDS,
+    build_path,
+    candidate_ids,
+    resource_name,
+)
 from tenanttrace.probe.oracle import TenantOracle, scan_for_markers
 from tenanttrace.probe.recorder import RunRecorder
 from tenanttrace.probe.seeder import SeederAdapter, SeederError, load_seeder, seed_tenant
@@ -147,7 +152,14 @@ def run_probe(config: Config, options: ProbeOptions | None = None) -> ProbeOutco
         if opts.dry_run:
             attack_names = config.probe.enabled_attacks(allow_mutation=opts.allow_mutation)
             dry_plan = _plan(config, inventory, attack_names)
-            state.errors.append("dry run: no attack requests were sent")
+            # INVALID, not VALID-with-nothing-in-it. A dry run left
+            # invalid_reason unset, so it fell through to the VALID branch and
+            # wrote a report with no controls and no findings — which renders,
+            # in every format, as an audit that passed.
+            invalid_reason = (
+                "dry run: no tenants were seeded and no request was sent, so this is a "
+                "plan rather than an audit and says nothing about tenant isolation."
+            )
             raise _Abort
 
         seeder = opts.seeder or _resolve_seeder(config, client)
@@ -355,7 +367,14 @@ def run_probe(config: Config, options: ProbeOptions | None = None) -> ProbeOutco
             errors=tuple(state.errors),
         )
 
-    artifact_dir = _write_artifacts(config, opts, report, list(sessions.values()), started)
+    # A dry run has nothing to record: no tenant was seeded, no request was
+    # sent. Writing an artifact for it put a report.json on disk that `report`
+    # and every downstream reader would happily render as a completed audit.
+    artifact_dir = (
+        None
+        if opts.dry_run
+        else _write_artifacts(config, opts, report, list(sessions.values()), started)
+    )
     return ProbeOutcome(report=report, artifact_dir=artifact_dir, plan=dry_plan)
 
 
@@ -648,8 +667,20 @@ def _resolve_seeder(config: Config, client: httpx.Client) -> SeederAdapter | Non
 def _plan(
     config: Config, inventory: EndpointInventory, attack_names: tuple[AttackName, ...]
 ) -> tuple[str, ...]:
-    """What a real run would attempt, endpoint by endpoint."""
+    """What a real run would attempt, endpoint by endpoint, plus a total.
+
+    The total used to count ``(attack, endpoint)`` pairs, which under-reported
+    a real run by roughly six times: it ignored the id fan-out per endpoint,
+    the cache attack's three-request sequence, that every attack runs in both
+    directions, and the positive controls entirely. A dry run exists to size a
+    rate limit and a blast radius before pointing this at something real, and a
+    number six times too small is worse than no number.
+
+    Still an estimate — the fan-out depends on what the seeder plants, which a
+    dry run deliberately does not do. It is labelled as one.
+    """
     lines: list[str] = []
+    requests = 0
     for attack in attack_names:
         if attack in {AttackName.IDOR, AttackName.CACHE}:
             targets = inventory.objects()
@@ -657,10 +688,27 @@ def _plan(
             targets = inventory.creators()
         else:
             targets = inventory.collections()
+        # Requests one endpoint costs in one direction.
+        per_endpoint = {
+            AttackName.IDOR: MAX_BLIND_IDS,
+            AttackName.CACHE: 3,  # cold, warm, hot
+            AttackName.PARAM_OVERRIDE: 1 + len(config.tenancy.columns()),  # baseline + spellings
+        }.get(attack, 1)
         for endpoint in targets:
-            verb = "skip " if config.is_allowlisted(endpoint.path) else "probe"
-            suffix = "  (cross_tenant_allowlist)" if verb == "skip " else ""
+            skipped = config.is_allowlisted(endpoint.path)
+            verb = "skip " if skipped else "probe"
+            suffix = "  (cross_tenant_allowlist)" if skipped else ""
             lines.append(f"{verb} {attack.value:<15} {endpoint.key}{suffix}")
+            if not skipped:
+                requests += per_endpoint * len(_DIRECTIONS)
+
+    controls = len(inventory.objects()) * len(_DIRECTIONS)
+    lines.append("")
+    lines.append(
+        f"≈{requests + controls} requests: {requests} attack (both directions, id fan-out "
+        f"included) + up to {controls} positive-control. Estimate — the real fan-out "
+        "depends on what the seeder plants."
+    )
     return tuple(lines)
 
 

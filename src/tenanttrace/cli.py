@@ -341,9 +341,17 @@ def probe(
         raise typer.Exit(EXIT_USAGE) from exc
 
     if dry_run:
-        console.print(f"[bold]dry run[/] — {count(len(outcome.plan), 'attempt')} would be made:\n")
+        # The plan ends with its own request estimate, which is the number this
+        # command exists to give. Counting plan *lines* here contradicted it.
+        console.print("[bold]dry run[/] — nothing was sent. Planned coverage:\n")
         for line in outcome.plan:
             console.print(f"  {line}")
+        if not outcome.plan:
+            err.print(
+                "\n[bold yellow]The plan is empty[/] — no endpoint was discovered. "
+                "Check " + escape("[target]") + " spec_path, and that the target "
+                "is reachable."
+            )
         raise typer.Exit(EXIT_OK)
 
     report = outcome.report
