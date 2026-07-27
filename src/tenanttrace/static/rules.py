@@ -20,21 +20,30 @@ from __future__ import annotations
 
 import ast
 import re
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 
-from tenanttrace.core.models import Category
-from tenanttrace.static.base import Hit, Scope, StaticContext
+from tenanttrace.core.models import Category, Confidence, Engine, Evidence, Finding
+from tenanttrace.core.severity import remediation_for, severity_for, tags_for, title_for
+from tenanttrace.static.base import Hit, ParsedFile, Scope, StaticContext
 from tenanttrace.static.dataflow import (
     Definition,
+    all_definitions,
     attribute_tail,
     definitions_reaching,
     dotted_name,
+    taints_from,
 )
 
 __all__ = [
     "cache_keys",
+    "dedupe",
+    "finding",
+    "iter_definitions",
     "job_payloads",
+    "parent_map",
     "raw_sql",
+    "scope_nodes",
+    "scopes",
     "tail",
     "truncate",
 ]
@@ -80,6 +89,11 @@ _SQL_BIND_RE = re.compile(r"[:@](\w+)|%\((\w+)\)s")
 _SQL_TABLE_RE = re.compile(r"\b(from|join|into|update)\b", re.IGNORECASE)
 
 _TENANT_STEM_RE = re.compile(r"tenant|org|company|account|workspace", re.IGNORECASE)
+
+
+_MODULE_SYMBOL = "<module>"
+
+_SCOPE_BOUNDARIES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 
 
 def raw_sql(scope: Scope, nodes: Sequence[ast.AST], ctx: StaticContext) -> list[Hit]:
@@ -408,3 +422,127 @@ def tail(node: ast.expr) -> str:
 
 def truncate(text: str, limit: int) -> str:
     return text if len(text) <= limit else f"{text[: limit - 1]}…"
+
+
+# --------------------------------------------------------------------------- #
+# Scaffolding: walking a Python file, and turning hits into findings.
+#
+# None of this mentions an ORM either. It walks an AST, builds the analysable
+# units, collapses duplicate hits, and renders a Finding — the same in every
+# Python adapter, and the second thing writing a second adapter revealed
+# (ADR-0012).
+# --------------------------------------------------------------------------- #
+
+
+def parent_map(tree: ast.Module) -> dict[int, ast.AST]:
+    """Map ``id(node) -> parent``. ``ast`` has no parent links and we need to
+    walk up a method chain to find where a query expression really ends."""
+    parents: dict[int, ast.AST] = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[id(child)] = parent
+    return parents
+
+
+def iter_definitions(node: ast.AST, prefix: str = "") -> Iterator[tuple[ast.AST, str]]:
+    """Yield every def/class in the tree with its dotted symbol name."""
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, _SCOPE_BOUNDARIES):
+            qualified = f"{prefix}{child.name}"
+            yield child, qualified
+            yield from iter_definitions(child, prefix=f"{qualified}.")
+        else:
+            yield from iter_definitions(child, prefix=prefix)
+
+
+def scope_nodes(root: ast.AST) -> Iterator[ast.AST]:
+    """Every node owned by this scope, never entering a nested def or class."""
+    stack: list[ast.AST] = [root]
+    while stack:
+        current = stack.pop()
+        for child in ast.iter_child_nodes(current):
+            if isinstance(child, _SCOPE_BOUNDARIES):
+                continue
+            yield child
+            stack.append(child)
+
+
+def scopes(file: ParsedFile, ctx: StaticContext) -> Iterator[Scope]:
+    """Yield the module scope, then every function and class body."""
+    yield Scope(_MODULE_SYMBOL, file.tree)
+    for node, symbol in iter_definitions(file.tree):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            yield Scope(
+                symbol,
+                node,
+                fn=node,
+                definitions=all_definitions(node),
+                tainted=frozenset(
+                    taints_from(
+                        node,
+                        set(ctx.tenant_sources),
+                        tenant_names=set(ctx.tenant_columns),
+                        claim_keys={ctx.jwt_claim},
+                    )
+                ),
+            )
+        elif isinstance(node, ast.ClassDef):
+            yield Scope(symbol, node)
+
+
+# ---------------------------------------------------------------- raw SQL
+
+
+def dedupe(hits: Sequence[Hit]) -> list[Hit]:
+    """Collapse duplicates: one defect, one finding.
+
+    Two passes. First, hits sharing an explicit ``dedupe_key`` (the same cache
+    key template read in one function and written in another) become one, the
+    write preferred because that is where the fix goes. Then one hit per
+    category per symbol, since a symbol is the finest granularity a fingerprint
+    records — three unscoped aggregates in one handler are one thing to fix.
+    """
+    by_key: dict[str, Hit] = {}
+    keyless: list[Hit] = []
+    for hit in hits:
+        if not hit.dedupe_key:
+            keyless.append(hit)
+            continue
+        current = by_key.get(hit.dedupe_key)
+        if current is None or (hit.priority, -hit.line) > (current.priority, -current.line):
+            by_key[hit.dedupe_key] = hit
+
+    by_symbol: dict[tuple[Category, str], Hit] = {}
+    for hit in sorted([*keyless, *by_key.values()], key=lambda h: (h.line, h.symbol)):
+        by_symbol.setdefault((hit.category, hit.symbol), hit)
+    return sorted(by_symbol.values(), key=lambda h: (h.symbol, h.line))
+
+
+def finding(hit: Hit, file: ParsedFile, ctx: StaticContext) -> Finding:
+    """Turn a rule hit into a suspected finding anchored to file::symbol."""
+    location = file.symbol_location(hit.symbol)
+    return Finding(
+        # A placeholder id, matching the probe half: the report layer numbers
+        # findings, and identity across runs is the fingerprint's job.
+        id="TT-0000",
+        title=title_for(hit.category, location),
+        category=hit.category,
+        severity=severity_for(hit.category),
+        confidence=Confidence.SUSPECTED,
+        engine=Engine.STATIC,
+        location=location,
+        tags=tags_for(hit.category),
+        evidence=Evidence(
+            file=file.rel_path,
+            line=hit.line,
+            snippet=truncate(file.source_line(hit.line), 200),
+            assumption=hit.assumption,
+            note=hit.note,
+        ),
+        remediation=remediation_for(
+            hit.category,
+            location=location,
+            model=hit.model or "Model",
+            column=ctx.tenant_column,
+        ),
+    )

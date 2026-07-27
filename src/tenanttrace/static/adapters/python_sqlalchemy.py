@@ -29,8 +29,7 @@ from __future__ import annotations
 import ast
 from collections.abc import Iterable, Iterator, Sequence
 
-from tenanttrace.core.models import Category, Confidence, Engine, Evidence, Finding, ScopingMode
-from tenanttrace.core.severity import remediation_for, severity_for, tags_for, title_for
+from tenanttrace.core.models import Category, Finding, ScopingMode
 from tenanttrace.static.base import (
     Hit,
     ParsedFile,
@@ -38,16 +37,17 @@ from tenanttrace.static.base import (
     ScopingSignal,
     StaticContext,
 )
-from tenanttrace.static.dataflow import (
-    all_definitions,
-    taints_from,
-)
 from tenanttrace.static.rules import (
     cache_keys,
+    dedupe,
+    finding,
+    iter_definitions,
     job_payloads,
+    parent_map,
     raw_sql,
+    scope_nodes,
+    scopes,
     tail,
-    truncate,
 )
 from tenanttrace.static.scoping import PREDICATE_CALLS, detect_scoping
 
@@ -122,9 +122,6 @@ _BYPASS_KEYWORDS = frozenset(
 
 _MODEL_BASES = frozenset({"Base", "DeclarativeBase", "Model", "SQLModel"})
 
-_SCOPE_BOUNDARIES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-_MODULE_SYMBOL = "<module>"
-
 
 # --------------------------------------------------------------------------- #
 # Assumptions. Each string is both the comment above its rule and the text the
@@ -162,39 +159,6 @@ _ASSUME_UNSCOPED_MODEL = (
 # --------------------------------------------------------------------------- #
 
 
-def _parent_map(tree: ast.Module) -> dict[int, ast.AST]:
-    """Map ``id(node) -> parent``. ``ast`` has no parent links and we need to
-    walk up a method chain to find where a query expression really ends."""
-    parents: dict[int, ast.AST] = {}
-    for parent in ast.walk(tree):
-        for child in ast.iter_child_nodes(parent):
-            parents[id(child)] = parent
-    return parents
-
-
-def _iter_definitions(node: ast.AST, prefix: str = "") -> Iterator[tuple[ast.AST, str]]:
-    """Yield every def/class in the tree with its dotted symbol name."""
-    for child in ast.iter_child_nodes(node):
-        if isinstance(child, _SCOPE_BOUNDARIES):
-            qualified = f"{prefix}{child.name}"
-            yield child, qualified
-            yield from _iter_definitions(child, prefix=f"{qualified}.")
-        else:
-            yield from _iter_definitions(child, prefix=prefix)
-
-
-def _scope_nodes(root: ast.AST) -> Iterator[ast.AST]:
-    """Every node owned by this scope, never entering a nested def or class."""
-    stack: list[ast.AST] = [root]
-    while stack:
-        current = stack.pop()
-        for child in ast.iter_child_nodes(current):
-            if isinstance(child, _SCOPE_BOUNDARIES):
-                continue
-            yield child
-            stack.append(child)
-
-
 # --------------------------------------------------------------------------- #
 # The adapter
 # --------------------------------------------------------------------------- #
@@ -216,11 +180,11 @@ class PythonSQLAlchemyAdapter:
     # -------------------------------------------------------------- findings
     def find_findings(self, file: ParsedFile, ctx: StaticContext) -> Iterable[Finding]:
         """Run every rule that applies in ``ctx.mode`` over one file."""
-        parents = _parent_map(file.tree)
+        parents = parent_map(file.tree)
         hits: list[Hit] = []
 
-        for scope in self._scopes(file, ctx):
-            nodes = tuple(_scope_nodes(scope.root))
+        for scope in scopes(file, ctx):
+            nodes = tuple(scope_nodes(scope.root))
             # Mode-independent: true under manual and global scoping alike.
             hits.extend(raw_sql(scope, nodes, ctx))
             hits.extend(cache_keys(scope, nodes, ctx))
@@ -233,32 +197,9 @@ class PythonSQLAlchemyAdapter:
         if ctx.mode is ScopingMode.GLOBAL:
             hits.extend(self._unscoped_models(file, ctx))
 
-        return [self._finding(hit, file, ctx) for hit in _dedupe(hits)]
+        return [finding(hit, file, ctx) for hit in dedupe(hits)]
 
     # ------------------------------------------------------------------ scopes
-    def _scopes(self, file: ParsedFile, ctx: StaticContext) -> Iterator[Scope]:
-        """Yield the module scope, then every function and class body."""
-        yield Scope(_MODULE_SYMBOL, file.tree)
-        for node, symbol in _iter_definitions(file.tree):
-            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-                yield Scope(
-                    symbol,
-                    node,
-                    fn=node,
-                    definitions=all_definitions(node),
-                    tainted=frozenset(
-                        taints_from(
-                            node,
-                            set(ctx.tenant_sources),
-                            tenant_names=set(ctx.tenant_columns),
-                            claim_keys={ctx.jwt_claim},
-                        )
-                    ),
-                )
-            elif isinstance(node, ast.ClassDef):
-                yield Scope(symbol, node)
-
-    # ---------------------------------------------------------------- raw SQL
 
     def _missing_filter(
         self,
@@ -360,7 +301,7 @@ class PythonSQLAlchemyAdapter:
             return []
         mixins = set(ctx.scope_mixins)
         hits: list[Hit] = []
-        for node, symbol in _iter_definitions(file.tree):
+        for node, symbol in iter_definitions(file.tree):
             if not isinstance(node, ast.ClassDef):
                 continue
             bases = {tail(base) for base in node.bases}
@@ -387,64 +328,11 @@ class PythonSQLAlchemyAdapter:
         return hits
 
     # ----------------------------------------------------------------- output
-    def _finding(self, hit: Hit, file: ParsedFile, ctx: StaticContext) -> Finding:
-        """Turn a rule hit into a suspected finding anchored to file::symbol."""
-        location = file.symbol_location(hit.symbol)
-        return Finding(
-            # A placeholder id, matching the probe half: the report layer numbers
-            # findings, and identity across runs is the fingerprint's job.
-            id="TT-0000",
-            title=title_for(hit.category, location),
-            category=hit.category,
-            severity=severity_for(hit.category),
-            confidence=Confidence.SUSPECTED,
-            engine=Engine.STATIC,
-            location=location,
-            tags=tags_for(hit.category),
-            evidence=Evidence(
-                file=file.rel_path,
-                line=hit.line,
-                snippet=truncate(file.source_line(hit.line), 200),
-                assumption=hit.assumption,
-                note=hit.note,
-            ),
-            remediation=remediation_for(
-                hit.category,
-                location=location,
-                model=hit.model or "Model",
-                column=ctx.tenant_column,
-            ),
-        )
 
 
 # --------------------------------------------------------------------------- #
 # Rule helpers
 # --------------------------------------------------------------------------- #
-
-
-def _dedupe(hits: Sequence[Hit]) -> list[Hit]:
-    """Collapse duplicates: one defect, one finding.
-
-    Two passes. First, hits sharing an explicit ``dedupe_key`` (the same cache
-    key template read in one function and written in another) become one, the
-    write preferred because that is where the fix goes. Then one hit per
-    category per symbol, since a symbol is the finest granularity a fingerprint
-    records — three unscoped aggregates in one handler are one thing to fix.
-    """
-    by_key: dict[str, Hit] = {}
-    keyless: list[Hit] = []
-    for hit in hits:
-        if not hit.dedupe_key:
-            keyless.append(hit)
-            continue
-        current = by_key.get(hit.dedupe_key)
-        if current is None or (hit.priority, -hit.line) > (current.priority, -current.line):
-            by_key[hit.dedupe_key] = hit
-
-    by_symbol: dict[tuple[Category, str], Hit] = {}
-    for hit in sorted([*keyless, *by_key.values()], key=lambda h: (h.line, h.symbol)):
-        by_symbol.setdefault((hit.category, hit.symbol), hit)
-    return sorted(by_symbol.values(), key=lambda h: (h.symbol, h.line))
 
 
 def _is_query_root(node: ast.Call, ctx: StaticContext) -> bool:
