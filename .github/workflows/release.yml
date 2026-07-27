@@ -2,7 +2,11 @@ name: release
 
 on:
   push:
-    tags: ["v*"]
+    # Full versions only. `v0` is a moving alias that always points at the
+    # newest 0.x, so it can never equal the packaged version — it fired this
+    # workflow and failed the tag check every single release, which is how a
+    # gate teaches people to ignore it.
+    tags: ["v*.*.*"]
 
 permissions:
   contents: write        # create the GitHub Release

@@ -349,10 +349,22 @@ def test_a_dry_run_records_nothing_at_all(tmp_path: Path) -> None:
     assert list(tmp_path.rglob("report.json")) == []
 
 
-def test_an_empty_plan_says_so_instead_of_looking_like_full_coverage() -> None:
-    result = runner.invoke(
-        app, ["probe", "--config", "fixtures/tenanttrace.vulnerable.toml", "--dry-run"]
+def test_an_empty_plan_says_so_instead_of_looking_like_full_coverage(tmp_path: Path) -> None:
+    """Deliberately points at a spec file that does not exist.
+
+    This used to reuse the vulnerable fixture's config, which fetches its spec
+    over HTTP — so the test passed only while nothing was listening on that
+    port, and started failing the moment the Docker demo was running. A test
+    whose result depends on whether a container happens to be up is not
+    testing what it claims to.
+    """
+    config = tmp_path / "t.toml"
+    config.write_text(
+        '[target]\nbase_url = "http://127.0.0.1:8000"\nallowed_hosts = ["127.0.0.1"]\n'
+        'spec = "openapi"\nspec_path = "does/not/exist.json"\n',
+        encoding="utf-8",
     )
+    result = runner.invoke(app, ["probe", "--config", str(config), "--dry-run"])
     assert "The plan is empty" in result.output
     assert "[target]" in result.output
 
