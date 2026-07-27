@@ -19,8 +19,11 @@ See THREAT_MODEL.md.
 from __future__ import annotations
 
 import importlib
+import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any, Protocol, runtime_checkable
+
+import httpx
 
 from tenanttrace._importing import ensure_cwd_importable
 from tenanttrace.core.models import SeededRecord, TenantContext, TenantLabel
@@ -28,15 +31,145 @@ from tenanttrace.probe.oracle import make_canary
 
 __all__ = [
     "SeederAdapter",
+    "SeederClient",
     "SeederError",
     "load_seeder",
     "normalize_records",
     "seed_tenant",
+    "unique",
 ]
 
 
 class SeederError(Exception):
     """Seeding failed. The run cannot continue: there is no ground truth."""
+
+
+class SeederClient:
+    """A thin, loud HTTP helper for seeders.
+
+    Every one of the six seeders written against real applications hand-rolled
+    the same four lines — call, check the status, decode the JSON, fail
+    somehow — and three of them wrote their own ``_post`` on top. That is the
+    boilerplate this removes.
+
+    The larger win is the failure message. A seeder that raises
+    ``KeyError: 'id'`` or a bare ``raise_for_status`` tells whoever is
+    debugging it nothing: not which call, not what came back, not what was
+    expected. Seeding failures are the most common way a first run dies, and
+    they used to be the most expensive to diagnose. Every error here names the
+    request, the expected status, the actual one, and what the body said.
+
+    Nothing about it is required — a seeder is ordinary code and may use httpx
+    directly, or a vendor SDK, or a database connection.
+    """
+
+    def __init__(
+        self,
+        client: httpx.Client,
+        *,
+        headers: Mapping[str, str] | None = None,
+    ) -> None:
+        self._client = client
+        self._headers = dict(headers or {})
+
+    def with_headers(self, **headers: str) -> SeederClient:
+        """A copy that sends these headers too — usually a credential."""
+        return SeederClient(self._client, headers={**self._headers, **headers})
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        expect: int | tuple[int, ...] = (200, 201, 202, 204),
+        json: Any = None,
+        data: Any = None,
+        params: Mapping[str, Any] | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> Any:
+        """Send a request, insist on the status, return the decoded body.
+
+        Returns ``None`` for an empty body rather than raising: a 204 from a
+        delete is a success with nothing to decode.
+        """
+        wanted = (expect,) if isinstance(expect, int) else tuple(expect)
+        try:
+            response = self._client.request(
+                method.upper(),
+                path,
+                json=json,
+                data=data,
+                params=params,
+                headers={**self._headers, **dict(headers or {})},
+            )
+        except httpx.HTTPError as exc:
+            msg = f"{method.upper()} {path} could not be sent: {type(exc).__name__}: {exc}"
+            raise SeederError(msg) from exc
+
+        if response.status_code not in wanted:
+            expected = ", ".join(str(code) for code in wanted)
+            msg = (
+                f"{method.upper()} {path} returned {response.status_code}, expected "
+                f"{expected}. The application said: {_excerpt(response.text)}"
+            )
+            raise SeederError(msg)
+
+        if not response.content:
+            return None
+        try:
+            return response.json()
+        except ValueError:
+            msg = (
+                f"{method.upper()} {path} returned {response.status_code} but the body is "
+                f"not JSON: {_excerpt(response.text)}"
+            )
+            raise SeederError(msg) from None
+
+    def get(self, path: str, **kwargs: Any) -> Any:
+        return self.request("GET", path, **kwargs)
+
+    def post(self, path: str, **kwargs: Any) -> Any:
+        return self.request("POST", path, **kwargs)
+
+    def put(self, path: str, **kwargs: Any) -> Any:
+        return self.request("PUT", path, **kwargs)
+
+    def patch(self, path: str, **kwargs: Any) -> Any:
+        return self.request("PATCH", path, **kwargs)
+
+    def delete(self, path: str, **kwargs: Any) -> Any:
+        return self.request("DELETE", path, **kwargs)
+
+    def field(self, body: Any, *names: str) -> Any:
+        """Read the first present key, or say which ones were looked for.
+
+        ``payload["id"]`` raising ``KeyError: 'id'`` three frames deep is the
+        other half of the debugging cost.
+        """
+        if isinstance(body, Mapping):
+            for name in names:
+                if name in body:
+                    return body[name]
+            keys = ", ".join(sorted(str(k) for k in body)[:12]) or "(empty object)"
+            msg = (
+                f"response has none of {', '.join(names)}. Keys present: {keys}. "
+                "Check the shape your application actually returns."
+            )
+            raise SeederError(msg)
+        msg = f"expected a JSON object to read {names[0]!r} from, got {type(body).__name__}"
+        raise SeederError(msg)
+
+
+def unique(prefix: str = "tt") -> str:
+    """A short value unique to this run — for names an application must not reuse."""
+    return f"{prefix}-{uuid.uuid4().hex[:10]}"
+
+
+def _excerpt(text: str, limit: int = 300) -> str:
+    body = " ".join(text.split())
+    if not body:
+        return "(empty body)"
+    return body if len(body) <= limit else body[:limit] + "…"
 
 
 @runtime_checkable
