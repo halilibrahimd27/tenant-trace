@@ -80,6 +80,13 @@ class SeederAdapter(Protocol):
         anything with an ``id`` is accepted and its kind inferred, because the
         common case is returning your API's own JSON straight back.
 
+        A record may also carry a ``path`` mapping naming the *other* path
+        parameters needed to reach it. A nested resource cannot be addressed
+        from its own id alone —
+        ``/api/database/rows/table/{table_id}/rows/{row_id}`` needs the table —
+        so return ``{"kind": "row", "id": "1", "path": {"table_id": "38"}}``
+        and the prober fills both slots.
+
         **``kind`` decides which endpoints an id is tried against**, and it has
         one rule: it must equal the resource segment of the endpoint path,
         lowercase and singular. ``/api/v1/accounts/{account_id}/contacts/{id}``
@@ -186,7 +193,11 @@ def normalize_records(
             continue
         kind = str(raw.get("kind") or raw.get("type") or default_kind)
         record_canary = str(raw.get("canary") or canary)
-        fields = {k: v for k, v in raw.items() if k not in {"kind", "type", "canary"}}
+        raw_path = raw.get("path")
+        path = (
+            {str(k): str(v) for k, v in raw_path.items()} if isinstance(raw_path, Mapping) else {}
+        )
+        fields = {k: v for k, v in raw.items() if k not in {"kind", "type", "canary", "path"}}
         records.append(
             SeededRecord(
                 kind=kind,
@@ -194,6 +205,7 @@ def normalize_records(
                 canary=record_canary,
                 owner=owner,
                 fields=fields,
+                path=path,
             )
         )
     return tuple(records)

@@ -9,8 +9,8 @@ narrow is what makes adding one cheap.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
-from dataclasses import dataclass
+from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Protocol, overload
 
 from tenanttrace.core.config import Config, _normalise_param
@@ -63,6 +63,11 @@ class AttackContext:
     # and attack reads on different records is what lets the cache attack own
     # that finding, with the right remediation attached.
     excluded_ids: frozenset[str] = frozenset()
+
+    @property
+    def path_literals(self) -> Mapping[str, str]:
+        """Fixed values for slots that name a type rather than an object."""
+        return self.config.tenancy.path_literals
 
     @property
     def tenant_path_params(self) -> frozenset[str]:
@@ -148,6 +153,11 @@ class Candidates:
 
     ids: tuple[str, ...]
     matched_kind: bool
+    # id -> the other path slots that lead to it, as the seeder declared them.
+    parents: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
+
+    def path_for(self, identifier: str) -> Mapping[str, str]:
+        return self.parents.get(identifier, {})
 
     def __bool__(self) -> bool:
         return bool(self.ids)
@@ -175,15 +185,17 @@ def candidate_ids(
     exclude: frozenset[str] = frozenset(),
 ) -> Candidates:
     """Which of the tenant's record ids are worth sending to this endpoint."""
+    parents = {r.id: dict(r.path) for r in tenant.records if r.path}
+
     kind = resource_name(endpoint)
     of_kind = tenant.record_ids(kind) if kind else ()
     matched = tuple(i for i in of_kind if i not in exclude)
     if matched:
-        return Candidates(matched, matched_kind=True)
+        return Candidates(matched, matched_kind=True, parents=parents)
 
     remaining = tuple(i for i in tenant.record_ids() if i not in exclude)
     if remaining:
-        return Candidates(remaining[:MAX_BLIND_IDS], matched_kind=False)
+        return Candidates(remaining[:MAX_BLIND_IDS], matched_kind=False, parents=parents)
 
     # Every candidate was used by a positive control, which happens when the
     # seeder plants a single record per kind. Falling back to those ids is the
@@ -191,7 +203,7 @@ def candidate_ids(
     # skipping the endpoint costs the finding entirely — and a skipped endpoint
     # in a report full of enforced results reads like coverage.
     fallback = of_kind[:MAX_BLIND_IDS] or tenant.record_ids()[:MAX_BLIND_IDS]
-    return Candidates(fallback, matched_kind=bool(of_kind))
+    return Candidates(fallback, matched_kind=bool(of_kind), parents=parents)
 
 
 def build_path(
@@ -200,6 +212,8 @@ def build_path(
     *,
     tenant: TenantContext | None = None,
     tenant_params: frozenset[str] = frozenset(),
+    path_values: Mapping[str, str] | None = None,
+    literals: Mapping[str, str] | None = None,
 ) -> str:
     """Fill an endpoint's path parameters for a cross-tenant request.
 
@@ -209,24 +223,50 @@ def build_path(
     the caller's credential is the canonical BOLA test. Every other slot takes
     the object identifier.
 
+    Two more sources sit between the tenant slot and the identifier. A record
+    may name the parents that lead to it — a row cannot be addressed without
+    its table — and ``[tenancy] path_literals`` pins a slot that names a
+    *type* rather than an object, as Squidex's ``{schema}`` does. Both exist
+    because otherwise those endpoints cannot be probed at all, not merely
+    probed badly.
+
     Before this, one id went into every slot, so
     ``/api/v1/accounts/{account_id}/conversations/{id}`` became
     ``/api/v1/accounts/7/conversations/7`` — a URL addressing nothing, whose
     404 said nothing about isolation. Three of the six applications this tool
     has been pointed at carry the tenant in the path.
     """
+    by_name = {_normalise_param(k): v for k, v in (path_values or {}).items()}
+    by_literal = {_normalise_param(k): v for k, v in (literals or {}).items()}
+
     values: dict[str, str] = {}
     for param in endpoint.path_params:
-        if tenant is not None and _normalise_param(param) in tenant_params:
+        name = _normalise_param(param)
+        if tenant is not None and name in tenant_params:
             values[param] = tenant.tenant_id
+        elif name in by_name:
+            # The record knows its own parents; nothing else can.
+            values[param] = by_name[name]
+        elif name in by_literal:
+            values[param] = by_literal[name]
         else:
             values[param] = identifier
     return substitute_path(endpoint.path, values)
 
 
-def object_params(endpoint: Endpoint, tenant_params: frozenset[str] = frozenset()) -> int:
-    """How many slots had to be filled with an object id we only guessed at."""
-    return sum(1 for p in endpoint.path_params if _normalise_param(p) not in tenant_params)
+def object_params(
+    endpoint: Endpoint,
+    tenant_params: frozenset[str] = frozenset(),
+    *,
+    known: Mapping[str, str] | None = None,
+) -> int:
+    """How many slots had to be filled with an object id we only guessed at.
+
+    A slot filled from a record's own parents or a configured literal is a real
+    value, so it does not make the path speculative.
+    """
+    supplied = tenant_params | {_normalise_param(k) for k in (known or {})}
+    return sum(1 for p in endpoint.path_params if _normalise_param(p) not in supplied)
 
 
 def is_speculative_path(
@@ -234,6 +274,7 @@ def is_speculative_path(
     tenant_params: frozenset[str] = frozenset(),
     *,
     matched_kind: bool = True,
+    known: Mapping[str, str] | None = None,
 ) -> bool:
     """Did this request address a record we actually know about?
 
@@ -253,7 +294,7 @@ def is_speculative_path(
     """
     if not matched_kind:
         return True
-    return object_params(endpoint, tenant_params) > 1
+    return object_params(endpoint, tenant_params, known=known) > 1
 
 
 def skipped(

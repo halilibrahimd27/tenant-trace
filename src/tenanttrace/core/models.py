@@ -316,6 +316,11 @@ class SeededRecord(_Frozen):
     canary: str
     owner: TenantLabel
     fields: Mapping[str, Any] = Field(default_factory=dict)
+    # Values for path parameters other than this record's own id. A nested
+    # resource needs its parents to be addressable at all:
+    # /api/database/rows/table/{table_id}/rows/{row_id} cannot be built from a
+    # row id alone, and filling {table_id} with it produces a URL for nothing.
+    path: Mapping[str, str] = Field(default_factory=dict)
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 

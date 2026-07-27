@@ -71,6 +71,8 @@ class IdorAttack:
                     identifier,
                     tenant=ctx.victim_ctx,
                     tenant_params=ctx.tenant_path_params,
+                    path_values=ids.path_for(identifier),
+                    literals=ctx.path_literals,
                 )
                 exchange = ctx.actor.request(endpoint.method, path, attack=self.name.value)
                 decision = ctx.oracle.judge(
@@ -81,6 +83,7 @@ class IdorAttack:
                         endpoint,
                         ctx.tenant_path_params,
                         matched_kind=ids.matched_kind,
+                        known={**ids.path_for(identifier), **ctx.path_literals},
                     ),
                 )
 

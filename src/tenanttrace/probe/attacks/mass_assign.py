@@ -95,6 +95,8 @@ class MassAssignAttack:
                     ids[0],
                     tenant=ctx.actor_ctx,
                     tenant_params=ctx.tenant_path_params,
+                    path_values=ids.path_for(ids[0]),
+                    literals=ctx.path_literals,
                 )
                 if endpoint.path_params
                 else endpoint.path

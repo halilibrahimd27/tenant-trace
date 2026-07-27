@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import tomllib
+from collections.abc import Mapping
 from ipaddress import ip_address
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -208,6 +209,11 @@ class TenancyConfig(_Section):
     # columns, which covers the *_id spellings; set it explicitly for APIs that
     # name the segment something else — Squidex uses {app}, Keycloak {realm}.
     path_params: tuple[str, ...] = ()
+    # Fixed values for path parameters that name a *type* rather than an
+    # object. Squidex routes content as /api/content/{app}/{schema}/{id}: no
+    # seeded id belongs in {schema}, and without a literal the endpoint cannot
+    # be probed at all.
+    path_literals: Mapping[str, str] = Field(default_factory=dict)
 
     @property
     def mode(self) -> ScopingMode:

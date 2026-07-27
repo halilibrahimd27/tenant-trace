@@ -174,3 +174,44 @@ def test_candidate_ids_says_whether_it_knew_what_it_was_doing() -> None:
     guessed = candidate_ids(endpoint("/api/campaigns/{id}", "id"), tenant)
     assert not guessed.matched_kind
     assert set(guessed.ids) == {"ct-1", "ld-1"}
+
+
+# --------------------------------------------------------------------------- #
+# Slots that no identifier can fill
+# --------------------------------------------------------------------------- #
+
+
+def test_a_record_can_name_the_parents_that_lead_to_it() -> None:
+    """A row cannot be addressed from a row id alone."""
+    nested = endpoint("/api/database/rows/table/{table_id}/rows/{row_id}", "table_id", "row_id")
+    assert (
+        build_path(nested, "1", path_values={"table_id": "38"})
+        == "/api/database/rows/table/38/rows/1"
+    )
+
+
+def test_a_slot_naming_a_type_can_be_pinned_to_a_literal() -> None:
+    """Squidex routes content as /api/content/{app}/{schema}/{id}; no seeded
+    id belongs in {schema}, and without a literal the endpoint is unprobeable."""
+    content = endpoint("/api/content/{app}/{schema}/{id}", "app", "schema", "id")
+    path = build_path(
+        content,
+        "abc",
+        tenant=VICTIM,
+        tenant_params=TenancyConfig(path_params=("app",)).tenant_path_params(),
+        literals={"schema": "notes"},
+    )
+    assert path == "/api/content/2/notes/abc"
+
+
+def test_a_record_beats_a_literal_because_only_it_knows_its_own_parents() -> None:
+    nested = endpoint("/api/t/{table_id}/rows/{row_id}", "table_id", "row_id")
+    path = build_path(nested, "1", path_values={"table_id": "38"}, literals={"table_id": "9"})
+    assert path == "/api/t/38/rows/1"
+
+
+def test_a_filled_slot_does_not_make_a_path_speculative() -> None:
+    """It holds a real value, so nothing about it was guessed."""
+    nested = endpoint("/api/t/{table_id}/rows/{row_id}", "table_id", "row_id")
+    assert is_speculative_path(nested, DEFAULTS)
+    assert not is_speculative_path(nested, DEFAULTS, known={"table_id": "38"})

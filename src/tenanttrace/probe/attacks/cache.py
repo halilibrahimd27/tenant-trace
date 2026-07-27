@@ -69,6 +69,8 @@ class CacheAttack:
                 identifier,
                 tenant=ctx.victim_ctx,
                 tenant_params=ctx.tenant_path_params,
+                path_values=ids.path_for(identifier),
+                literals=ctx.path_literals,
             )
 
             # Step 1 — cold. A leak here is an IDOR, not a cache bug.
