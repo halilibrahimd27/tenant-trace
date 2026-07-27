@@ -13,9 +13,16 @@ still goes out on the wire, it just never lands in a file.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 
-__all__ = ["REDACTED", "SENSITIVE_HEADERS", "is_sensitive_header", "redact_headers"]
+__all__ = [
+    "REDACTED",
+    "SENSITIVE_HEADERS",
+    "is_sensitive_header",
+    "redact_credentials_in_body",
+    "redact_headers",
+]
 
 REDACTED = "<redacted>"
 
@@ -58,3 +65,45 @@ def redact_headers(headers: Mapping[str, str]) -> dict[str, str]:
     return {
         name: (REDACTED if is_sensitive_header(name) else value) for name, value in headers.items()
     }
+
+
+# `"access_token": "zW3ne…"` and `access_token=zW3ne…`, in JSON, form bodies and
+# prose. The key half reuses the same vocabulary as the header rule, because an
+# application that calls its credential `X-Session-Token` in a header calls it
+# `session_token` in a body.
+_HINT_ALTERNATION = "|".join(_SENSITIVE_HINTS)
+_CREDENTIAL_IN_BODY = re.compile(
+    rf"""
+    (?P<key>["']?[A-Za-z0-9_.\-]*(?:{_HINT_ALTERNATION})[A-Za-z0-9_.\-]*["']?)
+    (?P<sep>\s*[:=]\s*)
+    (?P<value>"[^"]{{6,}}"|'[^']{{6,}}'|[A-Za-z0-9._\-]{{6,}})
+    """,
+    re.VERBOSE | re.IGNORECASE,
+)
+
+
+def redact_credentials_in_body(text: str | None) -> str | None:
+    """Replace credential-looking values inside a request or response body.
+
+    Header redaction was never enough. A `/me` or `/profile` endpoint that
+    echoes the caller's own API token is an ordinary shape, and the positive
+    control reads exactly those endpoints — so a live, non-expiring token was
+    written verbatim into `report.json` and `exchanges.jsonl`, the files the
+    shipped GitHub Action uploads as a build artifact. The same file carried
+    `"access_token": "<redacted>"` in the request headers three lines above.
+
+    Deliberately blunt. A false positive costs a mangled snippet; a false
+    negative costs a published credential. Applied in every mode, including
+    `--full-evidence` — that flag widens what is kept of the target's *data*,
+    never of a secret.
+    """
+    if not text:
+        return text
+
+    def replace(match: re.Match[str]) -> str:
+        # Keep the value's quoting so a redacted JSON body still parses — a
+        # snippet nobody can decode is evidence nobody can read.
+        quote = match.group("value")[0] if match.group("value")[0] in "\"'" else ""
+        return f"{match.group('key')}{match.group('sep')}{quote}{REDACTED}{quote}"
+
+    return _CREDENTIAL_IN_BODY.sub(replace, text)

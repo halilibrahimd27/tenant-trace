@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from tenanttrace.core.models import RunReport, utcnow
+from tenanttrace.core.redaction import redact_credentials_in_body
 from tenanttrace.probe.session import Exchange
 
 __all__ = ["RunRecorder", "RunPaths"]
@@ -97,8 +98,16 @@ class RunRecorder:
             # Headers were redacted when the Exchange was built; this is a
             # second, defensive pass in case a caller constructed one directly.
             "request_headers": dict(exchange.request_headers),
-            "request_body": _truncate(exchange.request_body, SNIPPET_CHARS),
-            "response_body": _truncate(exchange.response_text, SNIPPET_CHARS),
+            # Truncation was the only thing applied here, while the config
+            # promised "credentials are redacted". A /profile endpoint echoing
+            # the caller's own non-expiring token put it verbatim into the file
+            # the shipped GitHub Action uploads.
+            "request_body": redact_credentials_in_body(
+                _truncate(exchange.request_body, SNIPPET_CHARS)
+            ),
+            "response_body": redact_credentials_in_body(
+                _truncate(exchange.response_text, SNIPPET_CHARS)
+            ),
             "transport_error": exchange.transport_error,
         }
         with self.paths.exchanges.open("a", encoding="utf-8") as handle:

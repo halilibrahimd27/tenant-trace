@@ -30,7 +30,12 @@ import httpx
 
 from tenanttrace.core.config import Config
 from tenanttrace.core.models import Evidence, HttpMethod, TenantLabel
-from tenanttrace.core.redaction import REDACTED, SENSITIVE_HEADERS, is_sensitive_header
+from tenanttrace.core.redaction import (
+    REDACTED,
+    SENSITIVE_HEADERS,
+    is_sensitive_header,
+    redact_credentials_in_body,
+)
 from tenanttrace.core.redaction import redact_headers as _redact
 from tenanttrace.probe.oracle import ResponseFacts, facts_from_parts
 
@@ -97,9 +102,9 @@ class Exchange:
             request_method=self.method,
             request_url=self.url,
             request_headers=dict(self.request_headers),
-            request_body=self.request_body,
+            request_body=redact_credentials_in_body(self.request_body),
             response_status=self.status,
-            response_snippet=self.response_text[:snippet_chars],
+            response_snippet=redact_credentials_in_body(self.response_text[:snippet_chars]),
             elapsed_ms=self.elapsed_ms,
             note=self.transport_error,
         )

@@ -73,5 +73,8 @@ formats = ["json", "md"]
 baseline = ".tenanttrace-baseline.json"
 out_dir = ".tenanttrace"
 # Run artifacts hold real leaked data. By default response bodies are truncated
-# and credentials are redacted; --full-evidence keeps them verbatim.
+# and canary values shortened; --full-evidence keeps them verbatim.
+# Credential-looking values are stripped from headers AND bodies in every mode,
+# including --full-evidence — that flag widens what is kept of the target's
+# data, never of a secret.
 redact_evidence = true

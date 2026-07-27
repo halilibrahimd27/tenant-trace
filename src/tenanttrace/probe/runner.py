@@ -187,15 +187,23 @@ def run_probe(config: Config, options: ProbeOptions | None = None) -> ProbeOutco
         )
 
         # ---- POSITIVE CONTROLS -------------------------------------------
-        control_ids: set[str] = set()
+        # Per tenant. A shared set let one tenant's control ids delete the
+        # other tenant's records from every attack, and with per-type integer
+        # sequences an application id silently removed an identically numbered
+        # table (Baserow).
+        control_ids: dict[TenantLabel, set[str]] = {
+            TenantLabel.A: set(),
+            TenantLabel.B: set(),
+        }
         for label in (TenantLabel.A, TenantLabel.B):
             state.controls.append(
                 _self_access_control(
                     sessions[label],
                     tenants[label],
                     inventory,
-                    control_ids,
+                    control_ids[label],
                     config.tenancy.columns(),
+                    config.tenancy.tenant_path_params(),
                 )
             )
 
@@ -241,7 +249,7 @@ def run_probe(config: Config, options: ProbeOptions | None = None) -> ProbeOutco
                 ),
                 anonymous=anonymous,
                 allow_mutation=opts.allow_mutation and config.probe.allow_mutation,
-                excluded_ids=frozenset(control_ids),
+                excluded_ids=frozenset(control_ids[victim_label]),
             )
             for actor_label, victim_label in _DIRECTIONS
         }
@@ -359,6 +367,7 @@ def _self_access_control(
     inventory: EndpointInventory,
     touched: set[str],
     tenant_columns: tuple[str, ...] = ("tenant_id",),
+    tenant_path_params: frozenset[str] = frozenset(),
 ) -> ControlResult:
     """Assert that a tenant can read its own seeded data.
 
@@ -407,11 +416,24 @@ def _self_access_control(
         # Take the LAST id: attacks start from the first, so with two or more
         # seeded records per kind the two never touch the same object.
         identifier = ids[-1]
-        touched.add(identifier)
+        # The control is the one caller that knows the tenant for certain — it
+        # is the caller's own. It used to be the only caller of build_path that
+        # did not pass it, so on an application carrying the tenant in the path
+        # every control went to a structurally wrong URL. Three of six real
+        # targets are that shape; on Keycloak 418 of 420 control requests 404'd
+        # and the run only reached VALID through an unrelated endpoint.
         exchange = session.request(
-            endpoint.method, build_path(endpoint, identifier), attack="positive-control"
+            endpoint.method,
+            build_path(endpoint, identifier, tenant=tenant, tenant_params=tenant_path_params),
+            attack="positive-control",
         )
+        # ...and the id is spent only once it has actually been read. Marking
+        # it before the request burned ids on attempts that returned 403, and
+        # those ids are excluded from every later attack — which removed whole
+        # record kinds from the attack surface while the report still showed
+        # those endpoints as tested and enforced.
         if exchange.ok and proves_self_access(exchange):
+            touched.add(identifier)
             return ControlResult(
                 name=name,
                 passed=True,
