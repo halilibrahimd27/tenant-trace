@@ -1,0 +1,21 @@
+# Line endings are LF everywhere, in the repository and in the working tree.
+#
+# This is not a style preference. Git for Windows ships with
+# `core.autocrlf=true`, so without this file a Windows clone gets CRLF — and
+# the shell scripts here do not run on the machine that checked them out:
+#
+#   * `docker/run-demo.sh` is executed by bash inside a Linux container. With
+#     CRLF it fails on the first line, and `docker compose up -d` — the one
+#     command the README leads with — ends with the audit container exiting 2
+#     and no reports. Every Windows user got that, and CI never did, because
+#     CI only ever runs on Linux.
+#   * `plugin/scripts/scan-edited-file.sh` is the Claude Code hook, run by
+#     whatever shell the editor found.
+#
+# `eol=lf` rather than plain `text=auto`, because normalising only the stored
+# form still leaves a CRLF working tree on Windows, which is exactly where the
+# scripts get executed from.
+#
+# There are no binary files and no Windows-only scripts in this repository; if
+# either is ever added, give it an explicit rule here.
+* text=auto eol=lf

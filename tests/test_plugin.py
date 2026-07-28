@@ -323,3 +323,32 @@ def test_the_official_validator_accepts_both_manifests() -> None:
             check=False,
         )
         assert result.returncode == 0, result.stdout + result.stderr
+
+
+# --------------------------------------------------------------------------- #
+# Line endings
+# --------------------------------------------------------------------------- #
+
+SHELL_SCRIPTS = ("plugin/scripts/scan-edited-file.sh", "docker/run-demo.sh")
+
+
+@pytest.mark.parametrize("script", SHELL_SCRIPTS)
+def test_shell_scripts_are_checked_out_with_unix_line_endings(script: str) -> None:
+    """Git for Windows defaults to `core.autocrlf=true`.
+
+    Without a .gitattributes pinning eol=lf, a Windows clone got CRLF — and
+    `docker/run-demo.sh` is executed by bash *inside a Linux container*, where
+    the first line fails with `set: pipefail: invalid option name` and the rest
+    with `$'\r': command not found`. `docker compose up -d`, the one command
+    the README leads with, ended with the audit container exiting 2 and no
+    reports written.
+
+    Every Windows user who cloned the repository got that. CI never did,
+    because CI only ever checks out on Linux — the same one-platform blind
+    spot that hid five other defects.
+    """
+    raw = (REPO / script).read_bytes()
+    assert b"\r\n" not in raw, (
+        f"{script} has CRLF line endings. It runs under bash on a POSIX "
+        "system; check .gitattributes."
+    )
