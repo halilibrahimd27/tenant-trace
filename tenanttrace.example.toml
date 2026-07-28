@@ -61,7 +61,7 @@ attacks = ["idor", "listing", "aggregate", "param_override", "cache"]
 
 [static]
 path = "src/"
-adapter = "python_sqlalchemy"                      # auto | python_sqlalchemy
+adapter = "python_sqlalchemy"                      # auto | python_sqlalchemy | python_django
 # Where the tenant enters the request. Adjust to your app's vocabulary.
 tenant_sources = ["get_current_tenant", "get_tenant_id", "request.state.tenant_id"]
 jwt_claim = "tenant_id"

@@ -276,3 +276,22 @@ def test_a_spec_credential_names_an_env_var_not_a_secret(tmp_path: Path) -> None
         encoding="utf-8",
     )
     assert load_config(config_file).target.spec_auth() == {}
+
+
+def test_every_registered_static_adapter_can_be_named_in_config(tmp_path: Path) -> None:
+    """The loader's adapter list and the registry must not drift.
+
+    `python_django` shipped registered, tested, sniffable and documented — and
+    a config naming it was rejected as invalid, because the Literal in
+    StaticConfig was never widened. The only symptom was an error message
+    listing a name the README told the reader to use.
+    """
+    from tenanttrace.static import registry
+
+    for name in registry.available():
+        config_file = write(
+            tmp_path,
+            f'{MINIMAL}\n[static]\nadapter = "{name}"\n',
+            name=f"{name}.toml",
+        )
+        assert load_config(config_file).static.adapter == name

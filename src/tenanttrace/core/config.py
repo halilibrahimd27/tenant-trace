@@ -297,7 +297,11 @@ class StaticConfig(_Section):
     """Static-engine inputs. Everything it emits stays ``suspected``."""
 
     path: str | None = None
-    adapter: Literal["auto", "python_sqlalchemy"] = "auto"
+    # Every name in static/registry.py. A registered adapter that cannot be
+    # named here is only reachable by sniffing: `python_django` shipped, was
+    # registered, was tested, and was documented in the README — and a config
+    # asking for it by name was rejected as invalid.
+    adapter: Literal["auto", "python_sqlalchemy", "python_django"] = "auto"
     tenant_sources: tuple[str, ...] = (
         "get_current_tenant",
         "get_tenant_id",
