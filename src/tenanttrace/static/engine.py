@@ -23,6 +23,7 @@ from pathlib import Path
 from tenanttrace.core.config import Config
 from tenanttrace.core.fingerprint import with_fingerprint
 from tenanttrace.core.models import Finding, ScopingMode, sort_findings
+from tenanttrace.core.text import count
 from tenanttrace.static import registry, scoping
 from tenanttrace.static.base import LanguageAdapter, ParsedFile, ScopingSignal, StaticContext
 
@@ -171,12 +172,14 @@ def _collect(root: Path, config: Config) -> tuple[tuple[ParsedFile, ...], list[s
     warnings: list[str] = []
     parsed: list[ParsedFile] = []
     globs = registry.discovery_globs()
+    excluded = 0
 
     for path in _iter_paths(root):
         rel_path = _relative_path(path, root)
         if not _matches_any(rel_path, globs):
             continue
         if _is_excluded(rel_path, config.static.exclude_globs):
+            excluded += 1
             continue
         try:
             parsed.append(parse_file(path, rel_path))
@@ -186,6 +189,19 @@ def _collect(root: Path, config: Config) -> tuple[tuple[ParsedFile, ...], list[s
             )
         except (OSError, UnicodeDecodeError, ValueError) as exc:
             warnings.append(f"{rel_path}: skipped, could not be read ({exc})")
+
+    # `files_scanned` alone reads as the size of the tree. On Saleor it is
+    # 1146 — out of 4300 Python files, because migrations and tests are
+    # excluded by default. A reader given only the smaller number has no way to
+    # know that nearly three quarters of the repository went unread, and "8
+    # findings across 1146 files" is a very different claim from "…across the
+    # 27% of the repository this looked at".
+    if excluded:
+        warnings.append(
+            f"{count(excluded, 'file')} matched [static] exclude_globs "
+            f"({', '.join(config.static.exclude_globs)}) and were not read. "
+            "Findings below cover the remainder only."
+        )
 
     return tuple(parsed), warnings
 

@@ -576,3 +576,26 @@ def test_the_adapter_is_stateless_across_files(tmp_path: Path):
     assert first == []
     assert isinstance(second[0], Finding)
     assert third == []
+
+
+def test_the_scan_says_how_much_of_the_tree_it_did_not_read(tmp_path: Path):
+    """`files_scanned` alone reads as the size of the repository.
+
+    On Saleor it is 1146 — out of 4300 Python files, because migrations and
+    tests are excluded by default. "8 findings across 1146 files" is a very
+    different claim from "across the 27% of it this looked at", and nothing
+    said which one was being made.
+    """
+    (tmp_path / "app.py").write_text("x = 1\n", encoding="utf-8")
+    for name in ("migrations", "tests"):
+        directory = tmp_path / name
+        directory.mkdir()
+        (directory / "skipped.py").write_text("y = 2\n", encoding="utf-8")
+
+    result = scan(tmp_path, make_config(exclude_globs=("**/migrations/**", "**/tests/**")))
+
+    assert result.files_scanned == 1
+    excluded = [w for w in result.warnings if "exclude_globs" in w]
+    assert excluded, result.warnings
+    assert "2 files" in excluded[0]
+    assert "Findings below cover the remainder only" in excluded[0]
