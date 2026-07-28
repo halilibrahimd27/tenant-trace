@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased
+
+The gate ran on one platform and skipped what it could not reach, so a set of
+defects sat in a repository whose whole claim is that silence is not evidence.
+
+### Fixed
+
+- The plugin manifest declared `displayName`, which `claude plugin validate`
+  rejects outright — the plugin did not validate. The test written to catch
+  exactly that skips wherever the Claude Code CLI is absent, which includes CI,
+  so it had never once run. The key set is now checked everywhere.
+- `[static] adapter = "python_django"` was rejected as invalid. The adapter
+  shipped registered, sniffable, tested and documented; only the loader's
+  literal was never widened, so the name the README told you to use did not
+  parse. A test now ties the loader to the registry.
+- An ownership field naming a tenant is no longer read as evidence when that
+  tenant selector is a value **we** sent as a query parameter or body field.
+  The parameter-override attack asks for `?tenant_id=<victim>`, so an endpoint
+  that echoes its filters back could confirm a critical cross-tenant read whose
+  response carried no rows. Path segments still count — the positive controls
+  on a tenant-in-path application depend on them.
+- `tenanttrace metrics` exited 1 on a run whose verdict was PASS, because a
+  Windows console on a legacy codepage cannot encode the box drawing the
+  scorecard is built from. The gate failed for a font.
+- The test suite could not run on Windows at all: paths were interpolated into
+  TOML strings and into generated Python source, where `C:\Users\…` is a
+  sequence of escapes. One of those made a *hostile-code* test pass for the
+  wrong reason — nothing executed because nothing was ever parsed.
+
+### Internal
+
+- CI runs the gate on Windows as well as Linux. Every defect above was invisible
+  to a one-platform gate, which is the same failure this tool reports about
+  applications.
+
 ## 0.2.0 — 2026-07-27
 
 Six real open-source applications were seeded and audited end to end —
