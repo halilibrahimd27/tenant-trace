@@ -49,6 +49,52 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+  # The same gate, on the other platform people actually develop on.
+  #
+  # This job exists because a one-platform gate hid five real defects at once: a
+  # plugin manifest that failed official validation, a CLI that exited 1 on a
+  # legacy console codepage, and three tests that could not run on Windows —
+  # one of which passed for the wrong reason, reporting that hostile code was
+  # never executed when in truth it was never parsed. Reporting "no failures"
+  # from a gate that could not reach half its own suite is the exact thing this
+  # tool exists to call out in other people's applications.
+  #
+  # Targets are spelled out rather than run through `make`, which the Windows
+  # runner does not ship.
+  verify-windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Sync dependencies
+        run: uv sync --extra dev --extra fixtures
+
+      - name: Lint
+        run: |
+          uv run ruff check src tests fixtures seeders
+          uv run black --check src tests fixtures seeders
+
+      - name: Types
+        run: uv run mypy src
+
+      - name: Tests
+        run: uv run pytest --cov=tenanttrace --cov-report=term-missing --cov-fail-under=85
+
+      - name: Precision / recall gate
+        run: uv run tenanttrace metrics --labels fixtures/labels.yaml --min-recall 0.90
+
   # The other half: prove the containerised path works, over real sockets, with
   # a real Redis. This is what `docker compose up -d` gives a new user, so it is
   # tested rather than assumed.
