@@ -1,5 +1,64 @@
 # Changelog
 
+## 0.4.0 — 2026-07-28
+
+Pointed at three real applications before publishing anything: Gitea and
+Keycloak over HTTP, and the static engine at Saleor and Superset. All four
+behaved correctly under audit. TenantTrace did not.
+
+### The listing attack was dead on the applications most likely to need it
+
+`collections()` required an endpoint to have **no** path parameters. Keycloak
+serves everything as `/admin/realms/{realm}/…`, so it returned nothing, and the
+listing and parameter-override modules iterated an empty tuple and sent not one
+request. Three of the six real applications this tool has been pointed at carry
+their tenant in the path, and the listing attack's own docstring calls it the
+most common shape of this bug in practice.
+
+The report named all five attacks in `attacks_run`, recorded no error, and read
+as a completed audit. **Two of five attack classes were untested and nothing
+said so** — the exact failure this project exists to report about other
+people's applications.
+
+- A tenant slot no longer makes an endpoint an object endpoint. `objects()` and
+  `collections()` partition on *object* parameters, so a collection living
+  under a tenant is a collection.
+- The runner now names any attack that made no attempt at all, whatever the
+  reason — a shape the inventory classified out, an allowlist, a spec with no
+  collections in it. Defence in depth: the classification fix alone would have
+  closed this instance and left the class open.
+- Both modules built real URLs. Reaching the endpoint only exposed that they
+  sent `endpoint.path` verbatim, so the request went to a literal
+  `%7Brealm%7D` and its 404 was recorded as enforcement.
+- The shared-reference-data differential is skipped when the path names the
+  victim's tenant. There the victim reads its own data by definition, so
+  identical payloads mean the actor was served the victim's rows — the guard
+  would have suppressed the leak it sits beside.
+
+On Keycloak: 3 attack modules producing results → 5.
+
+### The positive control cost 35 requests, at administrative routes
+
+It walked `inventory.objects()` in spec order — alphabetical, and unrelated to
+what was seeded — stopping at the first endpoint that returned the tenant's own
+data. On Gitea that was the 35th, every time, for all four control passes: a
+repository name substituted into `/api/v1/admin/hooks/{id}`,
+`/api/v1/orgs/{org}` and `/api/v1/licenses/{name}`, three dozen requests at
+administrative routes with a garbage identifier, from an account with no
+business there, before the audit proper had begun.
+
+Endpoints whose resource matches a seeded kind are tried first. On Gitea: 140
+control requests → 4, administrative routes touched → 0, total run 921
+exchanges → 801, with identical coverage (498 attempts, 222 refused, 60
+endpoints).
+
+### A static scan reported its own size, not its coverage
+
+`files_scanned: 1146` on Saleor — out of 4300 Python files, because migrations
+and tests are excluded by default. "8 findings across 1146 files" is a very
+different claim from "across the 27% of the repository this read", and nothing
+said which was being made. The count of excluded files is now a warning.
+
 ## 0.3.0 — 2026-07-28
 
 The gate ran on one platform and skipped what it could not reach, so a set of
