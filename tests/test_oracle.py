@@ -173,6 +173,56 @@ def test_echoed_request_id_is_not_evidence(oracle: TenantOracle) -> None:
     assert decision.verdict is Verdict.ENFORCED
 
 
+def test_an_echoed_filter_is_not_ownership_evidence(oracle: TenantOracle) -> None:
+    """The parameter-override attack asks for `?tenant_id=<victim>`.
+
+    An endpoint that repeats its filters back — `{"filters": {"tenant_id": …},
+    "results": []}` — would otherwise confirm a critical cross-tenant read
+    whose response contains no rows at all. Same class of defect the echoed-id
+    guard exists for, arriving through the ownership signal instead.
+    """
+    victim_id = oracle.victim.tenant_id
+    body = json.dumps({"filters": {"tenant_id": victim_id}, "results": []})
+    decision = oracle.judge(
+        facts_from_parts(
+            status=200,
+            text=body,
+            request_url=f"http://127.0.0.1:8000/api/invoices?tenant_id={victim_id}",
+        ),
+        mode=AccessMode.COLLECTION,
+    )
+    assert decision.verdict is Verdict.ENFORCED
+    assert not decision.matched_ids
+
+
+def test_an_echoed_body_field_is_not_ownership_evidence(oracle: TenantOracle) -> None:
+    victim_id = oracle.victim.tenant_id
+    facts = facts_from_parts(
+        status=422,
+        text=json.dumps({"tenant_id": victim_id, "error": "unknown tenant"}),
+        request_url="http://127.0.0.1:8000/api/invoices",
+        request_body=json.dumps({"tenant_id": victim_id}),
+    )
+    assert oracle.owner_fields(facts, oracle.victim) == ()
+
+
+def test_a_tenant_in_the_path_still_names_an_owner(oracle: TenantOracle) -> None:
+    """The guard must not reach the path, or it would break the controls.
+
+    Three of six real targets carry the tenant in the URL, so the caller's own
+    selector is in every request it makes — including the positive control,
+    which leans on this signal when the application has no field a canary can
+    live in.
+    """
+    victim_id = oracle.victim.tenant_id
+    facts = facts_from_parts(
+        status=200,
+        text=json.dumps({"id": "x", "tenant_id": victim_id}),
+        request_url=f"http://127.0.0.1:8000/api/accounts/{victim_id}/invoices/7",
+    )
+    assert oracle.owner_fields(facts, oracle.victim) == (f"tenant_id={victim_id}",)
+
+
 def test_unsent_victim_id_is_a_leak() -> None:
     sent = "018f4c1e-3a9b-7c2d-9e5f-1a2b3c4d5e60"
     other = "018f4c1e-3a9b-7c2d-9e5f-1a2b3c4d5e6f"

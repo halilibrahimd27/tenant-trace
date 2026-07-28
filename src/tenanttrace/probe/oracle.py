@@ -32,6 +32,7 @@ import secrets
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlsplit
 
 from tenanttrace.core.models import (
     CANARY_PREFIX,
@@ -154,6 +155,28 @@ def _was_sent(identifier: str, facts: ResponseFacts) -> bool:
         return True
     body = facts.request_body
     return body is not None and identifier in body
+
+
+def _was_sent_as_input(value: str, facts: ResponseFacts) -> bool:
+    """Did this value travel out as a *query parameter or body field*?
+
+    Deliberately narrower than :func:`_was_sent`, and the narrowness is the
+    point. A value in the **path** selected what was addressed — a response
+    naming that owner is the application answering. A value in the **query
+    string or the body** is input the application may simply be repeating back:
+    a list endpoint that echoes its filters, ``{"filters": {"tenant_id": …},
+    "results": []}``, would otherwise confirm a cross-tenant leak containing no
+    rows at all. The parameter-override attack sends exactly that shape.
+
+    Keeping the path out of it is what lets a positive control still pass on an
+    application that carries the tenant in the URL, where the caller's own
+    selector is in every request it makes.
+    """
+    url = facts.request_url
+    if url is not None and value in urlsplit(url).query:
+        return True
+    body = facts.request_body
+    return body is not None and value in body
 
 
 def iter_json_strings(node: Any, *, depth: int = 0, max_depth: int = 64) -> Iterator[str]:
@@ -370,8 +393,17 @@ class TenantOracle:
         value stored *under a named ownership key* rather than scanning the body
         for a number. ``{"userId": 2}`` in a response served to user 3 is
         conclusive; ``{"amount": 2}`` is not even looked at.
+
+        The one thing it will not read as ownership is a value we supplied
+        ourselves. ``leaked_ids`` learned that first — see :func:`_was_sent` —
+        and this signal arrived afterwards carrying the same gap: the
+        parameter-override attack asks for ``?tenant_id=<victim>``, so an
+        endpoint that echoes its filters back would have confirmed a critical
+        cross-tenant read whose response contained no rows at all.
         """
         if facts.json_body is None or not tenant.tenant_id:
+            return ()
+        if _was_sent_as_input(tenant.tenant_id, facts):
             return ()
         wanted = {_normalise_key(column) for column in self.tenant_columns}
         found: list[str] = []
