@@ -99,7 +99,10 @@ class AggregateAttack:
         # collections() only. A count endpoint that carries a path parameter —
         # Teable's /api/table/{tableId}/aggregation/row-count, an exact verified
         # oracle — was unreachable, so the attack returned nothing against it.
-        for endpoint in (*ctx.inventory.collections(), *ctx.inventory.objects()):
+        for endpoint in (
+            *ctx.inventory.collections(ctx.tenant_path_params),
+            *ctx.inventory.objects(ctx.tenant_path_params),
+        ):
             if ctx.is_allowlisted(endpoint):
                 yield skipped(ctx, self.name, endpoint, reason=ALLOWLISTED)
                 continue

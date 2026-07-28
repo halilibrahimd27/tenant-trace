@@ -37,7 +37,7 @@ class IdorAttack:
     name = AttackName.IDOR
 
     def run(self, ctx: AttackContext) -> Iterator[ProbeResult]:
-        for endpoint in ctx.inventory.objects():
+        for endpoint in ctx.inventory.objects(ctx.tenant_path_params):
             if ctx.is_allowlisted(endpoint):
                 yield skipped(ctx, self.name, endpoint, reason=ALLOWLISTED)
                 continue

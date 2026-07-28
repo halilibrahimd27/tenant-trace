@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 from tenanttrace.core.models import AttackName, Endpoint, ProbeResult, Verdict
-from tenanttrace.probe.attacks.base import ALLOWLISTED, AttackContext, skipped
+from tenanttrace.probe.attacks.base import ALLOWLISTED, AttackContext, build_path, skipped
 from tenanttrace.probe.oracle import AccessMode
 
 __all__ = ["ParamOverrideAttack"]
@@ -46,7 +46,7 @@ class ParamOverrideAttack:
             return
 
         columns = ctx.tenancy_columns()
-        for endpoint in ctx.inventory.collections():
+        for endpoint in ctx.inventory.collections(ctx.tenant_path_params):
             if ctx.is_allowlisted(endpoint):
                 yield skipped(ctx, self.name, endpoint, reason=ALLOWLISTED)
                 continue
@@ -58,18 +58,28 @@ class ParamOverrideAttack:
             # remediation ("stop trusting request data") would be the wrong
             # advice for a query that simply has no WHERE clause. So the
             # baseline has to be clean before an override means anything.
-            baseline = ctx.actor.request(endpoint.method, endpoint.path, attack=self.name.value)
+            # The caller's *own* collection, with its own tenant in any path
+            # slot. The override then asks whether request data can move the
+            # answer to somebody else's tenant — which is only a question worth
+            # asking from a URL that legitimately belongs to the caller.
+            # `endpoint.path` was sent raw, so on an API carrying its tenant in
+            # the path this requested a literal %7Brealm%7D.
+            path = build_path(
+                endpoint, "", tenant=ctx.actor_ctx, tenant_params=ctx.tenant_path_params
+            )
+            baseline = ctx.actor.request(endpoint.method, path, attack=self.name.value)
             if ctx.oracle.judge(baseline.facts(), mode=AccessMode.COLLECTION).leaked:
                 continue
 
-            yield from self._query_channel(ctx, endpoint, columns, victim_id)
-            yield from self._header_channel(ctx, endpoint, columns, victim_id)
+            yield from self._query_channel(ctx, endpoint, path, columns, victim_id)
+            yield from self._header_channel(ctx, endpoint, path, columns, victim_id)
 
     # ------------------------------------------------------------------ #
     def _query_channel(
         self,
         ctx: AttackContext,
         endpoint: Endpoint,
+        path: str,
         columns: tuple[str, ...],
         victim_id: str,
     ) -> Iterator[ProbeResult]:
@@ -84,7 +94,7 @@ class ParamOverrideAttack:
         for column in [*declared, *undeclared]:
             exchange = ctx.actor.request(
                 endpoint.method,
-                endpoint.path,
+                path,
                 params={column: victim_id},
                 attack=self.name.value,
             )
@@ -131,6 +141,7 @@ class ParamOverrideAttack:
         self,
         ctx: AttackContext,
         endpoint: Endpoint,
+        path: str,
         columns: tuple[str, ...],
         victim_id: str,
     ) -> Iterator[ProbeResult]:
@@ -139,7 +150,7 @@ class ParamOverrideAttack:
         refused = 0
         for header in _header_names(columns[0]):
             session = ctx.actor.with_headers({header: victim_id})
-            exchange = session.request(endpoint.method, endpoint.path, attack=self.name.value)
+            exchange = session.request(endpoint.method, path, attack=self.name.value)
             decision = ctx.oracle.judge(exchange.facts(), mode=AccessMode.COLLECTION)
             if decision.verdict is Verdict.ENFORCED:
                 refused += 1

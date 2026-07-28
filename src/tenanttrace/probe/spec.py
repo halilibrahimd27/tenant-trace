@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import Path
@@ -44,7 +45,7 @@ from urllib.parse import urlsplit
 import httpx
 import yaml
 
-from tenanttrace.core.config import Config
+from tenanttrace.core.config import Config, _normalise_param
 from tenanttrace.core.models import Endpoint, HttpMethod
 from tenanttrace.core.text import count
 
@@ -62,6 +63,16 @@ __all__ = [
 
 _PATH_PARAM_RE = re.compile(r"\{([^{}/]+)\}")
 _MAX_REF_DEPTH = 8
+
+
+def _object_params(endpoint: Endpoint, tenant_params: AbstractSet[str]) -> int:
+    """How many of an endpoint's path slots select an *object* rather than a tenant.
+
+    Zero means the path addresses a collection, however many tenant segments it
+    passes through on the way. This is the single distinction that decides
+    which attacks ever see an endpoint.
+    """
+    return sum(1 for p in endpoint.path_params if _normalise_param(p) not in tenant_params)
 
 
 class SpecError(Exception):
@@ -82,21 +93,48 @@ class EndpointInventory:
     def __iter__(self) -> Iterator[Endpoint]:
         return iter(self.endpoints)
 
-    def objects(self) -> tuple[Endpoint, ...]:
-        """GET endpoints addressing a single object by id — the IDOR surface."""
+    def objects(self, tenant_params: AbstractSet[str] = frozenset()) -> tuple[Endpoint, ...]:
+        """GET endpoints addressing a single object by id — the IDOR surface.
+
+        A slot that selects a *tenant* does not make an endpoint an object
+        endpoint: ``/admin/realms/{realm}/groups`` addresses a collection that
+        happens to live under a tenant. See :meth:`collections`.
+        """
         return tuple(
-            e for e in self.endpoints if e.method is HttpMethod.GET and e.is_object_endpoint
+            e
+            for e in self.endpoints
+            if e.method is HttpMethod.GET and _object_params(e, tenant_params)
         )
 
-    def collections(self) -> tuple[Endpoint, ...]:
-        """GET endpoints returning a collection — the listing surface."""
-        return tuple(e for e in self.endpoints if e.is_collection_endpoint)
+    def collections(self, tenant_params: AbstractSet[str] = frozenset()) -> tuple[Endpoint, ...]:
+        """GET endpoints returning a collection — the listing surface.
+
+        ``tenant_params`` is what makes this correct on the applications where
+        it matters most. Requiring *zero* path parameters meant that on any API
+        carrying its tenant in the URL — Keycloak's ``/admin/realms/{realm}/…``,
+        Chatwoot's ``/api/v1/accounts/{account_id}/…``, three of six real
+        targets — every collection had a path parameter, so this returned
+        nothing and both the listing and parameter-override attacks iterated an
+        empty tuple and sent not one request.
+
+        They were still named in ``attacks_run``, and nothing in the report
+        said otherwise: the listing attack, whose own docstring calls it the
+        most common shape of this bug in practice, was structurally dead on
+        exactly the applications most likely to have it.
+        """
+        return tuple(
+            e
+            for e in self.endpoints
+            if e.method is HttpMethod.GET and not _object_params(e, tenant_params)
+        )
 
     def creators(self) -> tuple[Endpoint, ...]:
         """POST endpoints — the mass-assignment surface."""
         return tuple(e for e in self.endpoints if e.method is HttpMethod.POST)
 
-    def reachable(self, *, allow_mutation: bool = False) -> tuple[Endpoint, ...]:
+    def reachable(
+        self, *, allow_mutation: bool = False, tenant_params: AbstractSet[str] = frozenset()
+    ) -> tuple[Endpoint, ...]:
         """Endpoints a run of this shape can actually address.
 
         `len(inventory)` counts every operation the specification declares,
@@ -105,7 +143,9 @@ class EndpointInventory:
         against a denominator nothing could have reached makes an audit look
         worse than it was, which is its own kind of dishonesty.
         """
-        surface = {e.key: e for e in (*self.objects(), *self.collections())}
+        surface = {
+            e.key: e for e in (*self.objects(tenant_params), *self.collections(tenant_params))
+        }
         if allow_mutation:
             surface.update({e.key: e for e in self.creators()})
         return tuple(surface.values())

@@ -201,7 +201,7 @@ class MassAssignAttack:
     def _detail_path(self, ctx: AttackContext, endpoint: Endpoint) -> str | None:
         """Find the matching detail route for a create endpoint, as a template."""
         wanted = resource_name(endpoint)
-        for candidate in ctx.inventory.objects():
+        for candidate in ctx.inventory.objects(ctx.tenant_path_params):
             if resource_name(candidate) == wanted and candidate.path.startswith(endpoint.path):
                 from tenanttrace.probe.spec import substitute_path
 

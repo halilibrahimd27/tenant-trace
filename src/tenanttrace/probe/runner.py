@@ -296,6 +296,7 @@ def run_probe(config: Config, options: ProbeOptions | None = None) -> ProbeOutco
         # anything writes.
         attempted = 0
         crashed = 0
+        produced: dict[AttackName, int] = {attack.name: 0 for attack in attacks}
         for attack in attacks:
             for actor_label, _ in _DIRECTIONS:
                 attempted += 1
@@ -303,11 +304,31 @@ def run_probe(config: Config, options: ProbeOptions | None = None) -> ProbeOutco
                     for result in attack.run(contexts[actor_label]):
                         state.results.append(result)
                         state.endpoints_tested.add(result.endpoint.key)
+                        produced[attack.name] += 1
                 except Exception as exc:  # noqa: BLE001 - one attack must not end the run
                     crashed += 1
                     state.errors.append(
                         f"attack {attack.name.value} raised {type(exc).__name__}: {exc}"
                     )
+
+        # An attack that found nothing to attack is not the same as an attack
+        # that attacked and was refused, and `attacks_run` cannot tell them
+        # apart — it lists what was enabled, not what happened.
+        #
+        # Found by auditing Keycloak: every route carries {realm}, so the
+        # listing and parameter-override modules iterated an empty endpoint
+        # list and sent not one request. The report named all five attacks,
+        # recorded no error, and read as a complete audit. Whatever the reason
+        # an attack goes quiet — a shape the inventory classified out, an
+        # allowlist, a spec with no collections in it — silence about it is the
+        # one thing this tool may never produce.
+        silent = sorted(name.value for name, count in produced.items() if count == 0)
+        if silent:
+            state.errors.append(
+                f"{count(len(silent), 'attack module')} made no attempt at all "
+                f"({', '.join(silent)}): nothing in the inventory matched what they probe. "
+                "Those classes of cross-tenant access are untested in this run."
+            )
 
         # A run in which every attack crashed produced no results, and "no
         # results" renders identically to "nothing leaked". One attack failing
@@ -371,7 +392,10 @@ def run_probe(config: Config, options: ProbeOptions | None = None) -> ProbeOutco
         # a few ids blindly at every endpoint, losing both coverage and
         # confidence, and looks entirely normal in the report. Say it out loud.
         seeded_kinds = {record.kind for tenant in tenants.values() for record in tenant.records}
-        endpoint_kinds = {resource_name(endpoint) for endpoint in inventory.objects()} - {""}
+        endpoint_kinds = {
+            resource_name(endpoint)
+            for endpoint in inventory.objects(config.tenancy.tenant_path_params())
+        } - {""}
         if seeded_kinds and endpoint_kinds and not (seeded_kinds & endpoint_kinds):
             state.errors.append(
                 "no seeded record kind matches any endpoint's resource, so every object "
@@ -451,7 +475,8 @@ def run_probe(config: Config, options: ProbeOptions | None = None) -> ProbeOutco
             endpoints_discovered=len(inventory),
             endpoints_reachable=len(
                 inventory.reachable(
-                    allow_mutation=opts.allow_mutation and config.probe.allow_mutation
+                    allow_mutation=opts.allow_mutation and config.probe.allow_mutation,
+                    tenant_params=config.tenancy.tenant_path_params(),
                 )
             ),
             weak_identifiers=len(weak),
@@ -484,6 +509,32 @@ class _Abort(Exception):
 # --------------------------------------------------------------------------- #
 # Positive controls
 # --------------------------------------------------------------------------- #
+
+
+def _controls_first(endpoints: Sequence[Endpoint], tenant: TenantContext) -> tuple[Endpoint, ...]:
+    """Endpoints whose resource matches a seeded kind, then the rest.
+
+    The control stops at the first endpoint that returns the tenant's own data,
+    so the order decides how many requests it costs — and it used to be spec
+    order, which is alphabetical in an OpenAPI document and has nothing to do
+    with what was seeded.
+
+    On Gitea that meant every one of the four control passes sent exactly 35
+    requests before succeeding, 140 of the run's 921 exchanges. Worse than the
+    waste is where they went: a repository name substituted into
+    ``/api/v1/admin/hooks/{id}``, ``/api/v1/orgs/{org}`` and
+    ``/api/v1/licenses/{name}`` — three dozen requests at administrative routes
+    with a garbage identifier, from an account with no business there, before
+    the audit proper had begun.
+
+    A seeded kind matching the endpoint's resource is the only signal available
+    for "this id belongs here", and it is exactly the signal the attacks
+    already use.
+    """
+    kinds = {record.kind for record in tenant.records}
+    matched = [e for e in endpoints if resource_name(e) in kinds]
+    rest = [e for e in endpoints if resource_name(e) not in kinds]
+    return (*matched, *rest)
 
 
 def _self_access_control(
@@ -534,7 +585,7 @@ def _self_access_control(
         facts = exchange.facts()
         return bool(scan_for_markers(facts, markers) or own.owner_fields(facts, tenant))
 
-    for endpoint in inventory.objects():
+    for endpoint in _controls_first(inventory.objects(tenant_path_params), tenant):
         ids = candidate_ids(endpoint, tenant)
         if not ids:
             continue
@@ -566,8 +617,12 @@ def _self_access_control(
                 evidence=exchange.evidence(snippet_chars=400),
             )
 
-    for endpoint in inventory.collections():
-        exchange = session.request(endpoint.method, endpoint.path, attack="positive-control")
+    for endpoint in inventory.collections(tenant_path_params):
+        exchange = session.request(
+            endpoint.method,
+            build_path(endpoint, "", tenant=tenant, tenant_params=tenant_path_params),
+            attack="positive-control",
+        )
         if exchange.ok and proves_self_access(exchange):
             return ControlResult(
                 name=name,
@@ -774,13 +829,14 @@ def _plan(
     """
     lines: list[str] = []
     requests = 0
+    tenant_params = config.tenancy.tenant_path_params()
     for attack in attack_names:
         if attack in {AttackName.IDOR, AttackName.CACHE}:
-            targets = inventory.objects()
+            targets = inventory.objects(tenant_params)
         elif attack is AttackName.MASS_ASSIGN:
             targets = inventory.creators()
         else:
-            targets = inventory.collections()
+            targets = inventory.collections(tenant_params)
         # Requests one endpoint costs in one direction.
         per_endpoint = {
             AttackName.IDOR: MAX_BLIND_IDS,
@@ -795,7 +851,7 @@ def _plan(
             if not skipped:
                 requests += per_endpoint * len(_DIRECTIONS)
 
-    controls = len(inventory.objects()) * len(_DIRECTIONS)
+    controls = len(inventory.objects(tenant_params)) * len(_DIRECTIONS)
     lines.append("")
     lines.append(
         f"≈{requests + controls} requests: {requests} attack (both directions, id fan-out "
