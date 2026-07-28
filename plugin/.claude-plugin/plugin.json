@@ -1,6 +1,5 @@
 {
   "name": "tenant-trace",
-  "displayName": "TenantTrace",
   "description": "Prove whether tenant A can reach tenant B's data. Flags unscoped queries as you write them, and runs a full cross-tenant audit on demand.",
   "version": "0.2.0",
   "license": "MIT",
