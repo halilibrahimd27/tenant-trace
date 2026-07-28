@@ -96,3 +96,36 @@ def test_credentials_can_be_attached_without_rebuilding_the_client() -> None:
 def test_unique_values_do_not_repeat() -> None:
     assert unique("acme") != unique("acme")
     assert unique("acme").startswith("acme-")
+
+
+def test_every_verb_goes_through_the_same_checking() -> None:
+    """put/patch existed but nothing exercised them, so a typo in either would
+    have shipped."""
+    seen: list[str] = []
+
+    def record(request: httpx.Request) -> httpx.Response:
+        seen.append(request.method)
+        return httpx.Response(200, json={"ok": True})
+
+    api = client_for(record)
+    assert api.get("/x") == {"ok": True}
+    assert api.put("/x", json={}) == {"ok": True}
+    assert api.patch("/x", json={}) == {"ok": True}
+    assert seen == ["GET", "PUT", "PATCH"]
+
+
+def test_reading_a_field_from_something_that_is_not_an_object_says_what_it_got() -> None:
+    """An API that returns a bare list where the seeder expected an object is
+    an ordinary mistake, and `TypeError: list indices must be integers` is an
+    unhelpful way to learn about it."""
+    api = client_for(lambda r: httpx.Response(200, json=[{"id": 1}]))
+    with pytest.raises(SeederError, match="expected a JSON object to read 'id' from, got list"):
+        api.field(api.get("/x"), "id")
+
+
+def test_an_empty_error_body_is_described_rather_than_quoted_as_nothing() -> None:
+    """`The application said: ` trailing into silence reads like a truncated
+    message rather than an empty response."""
+    api = client_for(lambda r: httpx.Response(500, text=""))
+    with pytest.raises(SeederError, match=r"\(empty body\)"):
+        api.post("/x")
