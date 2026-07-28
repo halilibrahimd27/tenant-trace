@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 — 2026-07-28
 
 The gate ran on one platform and skipped what it could not reach, so a set of
 defects sat in a repository whose whole claim is that silence is not evidence.
@@ -28,6 +28,30 @@ defects sat in a repository whose whole claim is that silence is not evidence.
   TOML strings and into generated Python source, where `C:\Users\…` is a
   sequence of escapes. One of those made a *hostile-code* test pass for the
   wrong reason — nothing executed because nothing was ever parsed.
+
+### Tests
+
+The three least-covered modules were the three worth covering most, and what
+was missing in each was the failure path rather than the happy one.
+
+- **`mass_assign`** (66% → 99%), the only module that writes to a target. Its
+  untested half was every way a write can go wrong: a response with no id in
+  it, a resource with no delete route, a delete both tenants refuse. Each ends
+  with a record this run created sitting inside somebody else's tenant, and the
+  promise is that the finding says so out loud. That promise is now a test.
+- **`seeder`** (73% → 98%). `load_seeder`, `seed_tenant` and
+  `normalize_records` — the entire contract a user writes against, and the
+  first thing a first run touches — had no direct test at all. Its stated value
+  is its error messages; none of them was checked.
+- **`idor`** (79% → 100%) and **`listing`** (78% → 100%). The uncovered lines
+  were the two places these modules decide *which control failed*: the public
+  endpoint reclassification (ADR-0011) and the shared-reference-data guard. Get
+  either wrong and the report sends somebody to fix a query that is already
+  correct.
+
+Attack modules are now testable against a target that misbehaves on cue
+(`tests/attack_harness.py`) — only the target is faked, so a recorded exchange
+is the exchange a real run would record. The coverage floor moves 85% → 88%.
 
 ### Internal
 
