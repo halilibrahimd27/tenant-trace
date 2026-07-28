@@ -46,15 +46,16 @@ report ships confirmed findings with near-zero false positives.
 
 ```
 src/tenanttrace/
-  core/      models.py  config.py  severity.py  fingerprint.py
-             report.py  baseline.py                       # shared vocabulary
+  core/      models.py  config.py  severity.py  fingerprint.py  coverage.py
+             report.py  baseline.py  redaction.py  text.py    # shared vocabulary
   probe/     spec.py  seeder.py  session.py  oracle.py  runner.py
              asgi.py       # sync ASGI transport — in-process auditing
              recorder.py   # run artifacts
              attacks/  base.py  idor.py  listing.py  aggregate.py
                        param_override.py  mass_assign.py  cache.py
   static/    base.py  dataflow.py  scoping.py  registry.py  engine.py
-             adapters/python_sqlalchemy.py
+             rules.py      # language-level rules both adapters read (ADR-0012)
+             adapters/python_sqlalchemy.py  adapters/python_django.py
   correlate/ linker.py                                   # static ↔ dynamic
   metrics.py                                             # the precision/recall gate
   cli.py                                                 # Typer
@@ -102,7 +103,7 @@ because the adapter reads SQLAlchemy code without ever importing SQLAlchemy.
 
 ## Quality gate — `make verify`
 
-`ruff` · `black --check` · `mypy --strict` · `pytest` (≥85% coverage) ·
+`ruff` · `black --check` · `mypy --strict` · `pytest` (≥88% coverage) ·
 fixture precision/recall check (recall ≥90% on `labels.yaml`).
 
 Property-test the fragile parts specifically: URL/path normalization, the canary

@@ -321,7 +321,9 @@ Being specific about this is part of the tool being trustworthy.
 - **Authorization beyond tenancy.** Whether a viewer can act like an admin
   *within* one tenant is a different question, and this tool does not ask it.
 - **Non-Python codebases, statically.** The prober is language-agnostic; the
-  static engine currently ships one adapter (Python + SQLAlchemy).
+  static engine ships Python adapters only — SQLAlchemy and Django. Point it at
+  a Rails or Laravel tree and it says it does not recognise it, rather than
+  reporting nothing found.
 
 ## Safety
 
@@ -350,7 +352,7 @@ See [SECURITY.md](SECURITY.md) and [THREAT_MODEL.md](THREAT_MODEL.md).
 
 ```bash
 make install       # uv sync --extra dev --extra fixtures
-make verify        # ruff · black · mypy --strict · pytest ≥85% · recall ≥90%
+make verify        # ruff · black · mypy --strict · pytest ≥88% · recall ≥90%
 make demo          # audit both fixtures, write reports
 make fixtures-up   # boot the fixtures in Docker (only needed for the HTTP demo)
 ```
