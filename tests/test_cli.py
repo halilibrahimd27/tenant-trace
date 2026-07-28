@@ -6,13 +6,22 @@ whose positive controls failed must not be able to report a green build.
 
 from __future__ import annotations
 
+import io
 import json
+import sys
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
-from tenanttrace.cli import EXIT_FINDINGS, EXIT_INVALID, EXIT_OK, EXIT_USAGE, app
+from tenanttrace.cli import (
+    EXIT_FINDINGS,
+    EXIT_INVALID,
+    EXIT_OK,
+    EXIT_USAGE,
+    _speak_utf8,
+    app,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 VULNERABLE = str(REPO_ROOT / "fixtures" / "tenanttrace.vulnerable.toml")
@@ -523,3 +532,51 @@ def test_diff_can_gate_a_build_on_coverage_alone(tmp_path: Path) -> None:
 
     gated = runner.invoke(app, ["diff", str(before), str(after), "--fail-on-regression"])
     assert gated.exit_code == EXIT_FINDINGS
+
+
+# --------------------------------------------------------------------------- #
+# Output encoding
+# --------------------------------------------------------------------------- #
+
+
+class _LegacyStream(io.StringIO):
+    """A console stuck on a codepage that cannot encode `─` or `→`."""
+
+    encoding = "cp1254"
+    errors = "strict"
+
+    def reconfigure(self, *, encoding: str | None = None, errors: str | None = None) -> None:
+        if encoding is not None:
+            self.encoding = encoding
+        if errors is not None:
+            self.errors = errors
+
+
+def test_a_legacy_console_is_retuned_to_utf8(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Windows console defaults to a legacy codepage — cp1254 on a Turkish
+    install — and every one of them fails on the box drawing the report and the
+    metrics scorecard are built from. The UnicodeEncodeError propagated out of
+    the command, so `tenanttrace metrics` exited 1 on a run whose verdict was
+    PASS: the gate failed for a font.
+    """
+    stream = _LegacyStream()
+    monkeypatch.setattr(sys, "stdout", stream)
+    monkeypatch.setattr(sys, "stderr", stream)
+
+    _speak_utf8()
+
+    assert stream.encoding == "utf-8"
+    assert stream.errors == "replace", "a glyph may be lost; a verdict may not"
+
+
+def test_a_stream_that_cannot_be_retuned_is_not_fatal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Failing to set an encoding must not take the command down with it."""
+
+    class Stubborn(_LegacyStream):
+        def reconfigure(self, **kwargs: object) -> None:
+            raise OSError("stream is detached")
+
+    monkeypatch.setattr(sys, "stdout", Stubborn())
+    monkeypatch.setattr(sys, "stderr", io.StringIO())  # no reconfigure at all
+
+    _speak_utf8()

@@ -15,6 +15,7 @@ merge gate:
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import re
 import sys
@@ -38,6 +39,33 @@ from tenanttrace.core.models import (
     Verdict,
 )
 from tenanttrace.core.text import count
+
+
+def _speak_utf8() -> None:
+    """Make the standard streams carry the characters this tool prints.
+
+    A Windows console defaults to a legacy codepage — cp1254 on a Turkish
+    install, cp437 on plenty of others — and every one of them fails on the box
+    drawing and arrows the report and the metrics scorecard are built from.
+    The failure is a ``UnicodeEncodeError`` that propagates out of the command,
+    so ``tenanttrace metrics`` exited 1 on a run whose verdict was PASS: the
+    gate failed for a font, and read as a security finding.
+
+    ``errors="replace"`` rather than ``strict``: a character that still cannot
+    be rendered should cost a glyph, never a verdict. Done before the consoles
+    are built, because rich binds the stream when it is constructed.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        # A stream that refuses to be retuned is not worth a crash: printing in
+        # whatever encoding it already has is strictly better than not running.
+        with contextlib.suppress(OSError, ValueError):
+            reconfigure(encoding="utf-8", errors="replace")
+
+
+_speak_utf8()
 
 app = typer.Typer(
     name="tenanttrace",
