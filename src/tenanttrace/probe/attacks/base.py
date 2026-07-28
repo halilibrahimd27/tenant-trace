@@ -26,7 +26,7 @@ from tenanttrace.probe.oracle import AccessMode, TenantOracle
 from tenanttrace.probe.session import TenantSession
 from tenanttrace.probe.spec import EndpointInventory, substitute_path
 
-__all__ = ["Attack", "AttackContext", "candidate_ids", "resource_name", "result_from"]
+__all__ = ["Attack", "AttackContext", "candidate_ids", "resource_name"]
 
 # How many of the victim's ids to try per endpoint when the resource cannot be
 # matched by name. Trying every id against every endpoint turns a 20-endpoint
@@ -354,24 +354,3 @@ def serves_anyone(
     if probe.transport_error is not None:
         return False
     return ctx.oracle.judge(probe.facts(), mode=AccessMode.OBJECT, sent_ids=sent_ids).leaked
-
-
-def result_from(
-    *,
-    attack: AttackName,
-    endpoint: Endpoint,
-    ctx: AttackContext,
-    verdict: Verdict,
-    detail: str,
-    evidence_source: Sequence[object] = (),
-) -> ProbeResult:  # pragma: no cover - thin helper kept for symmetry
-    """Small convenience wrapper so attacks read declaratively."""
-    del evidence_source
-    return ProbeResult(
-        attack=attack,
-        endpoint=endpoint,
-        actor=ctx.actor_ctx.label,
-        target=ctx.victim_ctx.label,
-        verdict=verdict,
-        detail=detail,
-    )
