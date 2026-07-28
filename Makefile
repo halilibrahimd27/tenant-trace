@@ -28,8 +28,8 @@ format:  ## Apply black + ruff --fix
 types:  ## mypy --strict
 	$(UV) run mypy src
 
-test:  ## pytest with the coverage gate (>=85%)
-	$(UV) run pytest --cov=tenanttrace --cov-report=term-missing --cov-fail-under=85
+test:  ## pytest with the coverage gate (>=88%)
+	$(UV) run pytest --cov=tenanttrace --cov-report=term-missing --cov-fail-under=88
 
 property:  ## Hypothesis property tests only
 	$(UV) run pytest -m property -v

@@ -90,7 +90,7 @@ jobs:
         run: uv run mypy src
 
       - name: Tests
-        run: uv run pytest --cov=tenanttrace --cov-report=term-missing --cov-fail-under=85
+        run: uv run pytest --cov=tenanttrace --cov-report=term-missing --cov-fail-under=88
 
       - name: Precision / recall gate
         run: uv run tenanttrace metrics --labels fixtures/labels.yaml --min-recall 0.90
