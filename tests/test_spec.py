@@ -224,8 +224,11 @@ def test_spec_from_disk(tmp_path: Path) -> None:
     spec_file = tmp_path / "openapi.json"
     spec_file.write_text(json.dumps(OPENAPI), encoding="utf-8")
     config_file = tmp_path / "t.toml"
+    # as_posix(), because a Windows path in a TOML basic string is a sequence
+    # of escapes: `C:\Users\…` fails to parse at `\U`. Forward slashes are a
+    # valid path on both platforms and survive the round trip.
     config_file.write_text(
-        f'[target]\nbase_url = "http://127.0.0.1:8000"\nspec_path = "{spec_file}"\n',
+        f'[target]\nbase_url = "http://127.0.0.1:8000"\nspec_path = "{spec_file.as_posix()}"\n',
         encoding="utf-8",
     )
     inventory = load_inventory(load_config(config_file), None)

@@ -296,9 +296,10 @@ def test_config_accepts_the_capture_formats(tmp_path: Path, kind: str) -> None:
     spec_file.write_text(json.dumps(document), encoding="utf-8")
 
     config_file = tmp_path / "t.toml"
+    # as_posix(): a Windows path in a TOML basic string parses as escapes.
     config_file.write_text(
         f'[target]\nbase_url = "http://127.0.0.1:8000"\n'
-        f'spec = "{kind}"\nspec_path = "{spec_file}"\n',
+        f'spec = "{kind}"\nspec_path = "{spec_file.as_posix()}"\n',
         encoding="utf-8",
     )
 

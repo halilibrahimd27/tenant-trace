@@ -449,9 +449,15 @@ def test_a_file_that_does_not_parse_is_skipped_with_a_warning(tmp_path: Path):
 def test_module_level_code_is_parsed_and_never_executed(tmp_path: Path):
     """CLAUDE.md rule 1. The sentinel exists only if the module ran."""
     sentinel = tmp_path / "sentinel.txt"
+    # Every path goes in through !r. A raw Windows path pasted into Python
+    # source is a string of escapes — `C:\Users\…` dies at `\U` — so the
+    # hostile file failed to *parse*, and this test passed for the wrong
+    # reason: nothing was executed because nothing was ever analysed. The
+    # files_scanned assertion below is what catches that.
+    touch = f"touch {sentinel.as_posix()}"
     (tmp_path / "hostile.py").write_text(
         "import os\n"
-        f"os.system('touch {sentinel}')\n"
+        f"os.system({touch!r})\n"
         "from pathlib import Path\n"
         f"Path({str(sentinel)!r}).write_text('executed')\n",
         encoding="utf-8",
